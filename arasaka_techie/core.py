@@ -29,7 +29,7 @@ from pathlib import Path
 
 APP_ID = "arasaka-techie"
 APP_NAME = "ARASAKA TECHIE"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 HOME = Path.home()
 PKG = Path(__file__).resolve().parent
@@ -111,7 +111,19 @@ def from_preset(pid: str, d: DB | None = None) -> dict:
 
 
 def part(b: dict, cat: str, d: DB | None = None):
-    return (d or db()).get(cat, b["parts"].get(cat))
+    pid = b["parts"].get(cat)
+    if pid and pid.startswith("pc:"):
+        return (b.get("custom") or {}).get(cat)
+    return (d or db()).get(cat, pid)
+
+
+def part_name(b: dict, cat: str, pid: str | None = None, d: DB | None = None) -> str:
+    """Nome da peca (inclusive as lidas do PC, que nao estao na base)."""
+    pid = b["parts"].get(cat) if pid is None else pid
+    if pid and pid.startswith("pc:"):
+        p = (b.get("custom") or {}).get(cat)
+        return (p["name"] + " (do seu PC)") if p else "—"
+    return (d or db()).name(cat, pid)
 
 
 def reset_fans(b: dict, d: DB | None = None):
@@ -445,9 +457,9 @@ def _closeness(cat: str, old: dict | None, new: dict, mobo: dict | None = None, 
     if cat == "psu":
         return new["watts"] + (500 if new["form"] != old["form"] else 0)
     if cat == "mobo":
-        return (0 if new["form"] == old["form"] else 10) + (0 if ram and new["mem"] == ram["type"] else 5)
+        return (0 if new["form"] == old["form"] else 10) + (0 if ram and new["mem"] == ram["type"] else 5) + (3 if new["chipset"][:1] in "XZ" else 0)
     if cat == "ram":
-        return abs(new["gb"] - old["gb"]) * 0.5 + abs(new["speed"] - old["speed"]) / 400 + (6 if new["sticks"] == 1 and old["sticks"] > 1 else 0) + (20 if new["gb"] < old["gb"] else 0)
+        return abs(new["gb"] - old["gb"]) * 0.5 + abs(new["speed"] / MEM_REF.get(new["type"], 3200) - old["speed"] / MEM_REF.get(old["type"], 3200)) * 8 + (6 if new["sticks"] == 1 and old["sticks"] > 1 else 0) + (20 if new["gb"] < old["gb"] else 0)
     if cat == "cooler":
         return abs(new["capacity"] - old["capacity"]) / 20 + (0 if new["kind"] == old["kind"] else 4) + (30 if new["capacity"] < old["capacity"] else 0)
     if cat == "case":
@@ -487,9 +499,9 @@ def upgrade(b: dict, cat: str, new_id: str, d: DB | None = None) -> dict:
         reset_fans(nb, d)
     locked = {cat}
     changes = []
-    before_fix = {i["code"] for i in _fixables(b, d)}       # problemas que ja existiam nao entram como "obrigatorio"
+    before_fix = {i["text"] for i in _fixables(b, d)}       # o mesmo problema que ja existia nao entra como "obrigatorio"
     for _ in range(8):
-        todo = [i for i in _fixables(nb, d) if i["code"] not in before_fix or i["level"] == "erro"]
+        todo = [i for i in _fixables(nb, d) if i["text"] not in before_fix or i["level"] == "erro"]
         todo.sort(key=lambda i: i["level"] != "erro")
         fixed = False
         for iss in todo:
@@ -533,6 +545,147 @@ def upgrade(b: dict, cat: str, new_id: str, d: DB | None = None) -> dict:
     return {"build": nb, "changed": {"cat": cat, "old": b["parts"].get(cat), "new": new_id}, "changes": changes,
             "issues": check(nb, d), "games": gains, "avg_gain": avg,
             "air_before": airflow(b, d), "air_after": airflow(nb, d), "power_before": power(b, d), "power_after": power(nb, d)}
+
+
+# ================================================================ sugestoes de upgrade
+def _cost(ids: list[str], idx: dict | None) -> tuple[float | None, int]:
+    """Soma dos menores precos (None se nenhum tem preco) e quantas pecas ficaram sem preco."""
+    if not idx:
+        return None, len(ids)
+    known = [idx[i]["price"] for i in ids if isinstance((idx.get(i) or {}).get("price"), (int, float))]
+    return (sum(known) if known else None), len(ids) - len(known)
+
+
+def _suggestion(b: dict, cat: str, pid: str, d: DB, idx: dict | None) -> dict:
+    r = upgrade(b, cat, pid, d)
+    cost, miss = _cost([pid] + [c["new"] for c in r["changes"]], idx)
+    before = {i["text"] for i in check(b, d)}
+    new_warn = [i for i in r["issues"] if i["level"] == "aviso" and i["text"] not in before]
+    return {"cat": cat, "id": pid, "gain": r["avg_gain"], "changes": r["changes"], "cost": cost, "no_price": miss,
+            "errors": errors(r["issues"]), "warnings": new_warn, "result": r}
+
+
+def pick_tiers(cands: list[dict], min_gain: float = 3.0) -> list[dict]:
+    """Ate 3 opcoes que fazem sentido: passo pequeno, equilibrado e o maximo (e o melhor custo-beneficio, se houver preco)."""
+    good = sorted([c for c in cands if c["gain"] >= min_gain and not c["errors"]], key=lambda c: c["gain"])
+    if not good:
+        return []
+    out = {}
+    small = next((c for c in good if c["gain"] >= 12), good[0])
+    out["passo pequeno"] = small
+    out["máximo"] = good[-1]
+    mid_target = (small["gain"] + good[-1]["gain"]) / 2
+    out["equilibrado"] = min(good, key=lambda c: abs(c["gain"] - mid_target))
+    priced = [c for c in good if c["cost"] and not c["no_price"]]
+    if priced:
+        out["custo-benefício"] = max(priced, key=lambda c: c["gain"] / c["cost"])
+    seen, res = set(), []
+    for tier in ("custo-benefício", "passo pequeno", "equilibrado", "máximo"):
+        c = out.get(tier)
+        if c and c["id"] not in seen:
+            seen.add(c["id"])
+            res.append(dict(c, tier=tier))
+    return res
+
+
+def platform_of(b: dict, d: DB | None = None) -> dict:
+    d = d or db()
+    cpu, mobo, ram = part(b, "cpu", d), part(b, "mobo", d), part(b, "ram", d)
+    sockets = mobo_sockets(mobo) if mobo else ([cpu["socket"]] if cpu else [])
+    return {"sockets": sockets, "mem": (ram or {}).get("type") or (mobo or {}).get("mem"), "socket": sockets[0] if sockets else None}
+
+
+def suggest_same_platform(b: dict, d: DB | None = None, idx: dict | None = None) -> dict:
+    """Upgrades que encaixam na placa-mae e na memoria atuais: {cat: [sugestoes]} + observacoes."""
+    d = d or db()
+    cpu, gpu, ram, st, cool, mobo = (part(b, c, d) for c in ("cpu", "gpu", "ram", "storage", "cooler", "mobo"))
+    plat = platform_of(b, d)
+    out: dict = {"cpu": [], "gpu": [], "ram": [], "cooler": [], "storage": [], "notes": []}
+    if cpu:
+        cands = [_suggestion(b, "cpu", p["id"], d, idx) for p in d.parts["cpu"]
+                 if p["socket"] in plat["sockets"] and (not plat["mem"] or plat["mem"] in p["mem"]) and p["score"] > cpu["score"] + 2]
+        cands = [c for c in cands if not {"mobo", "ram"} & {x["cat"] for x in c["changes"]}]
+        out["cpu"] = pick_tiers(cands, 2.0)
+        if not cands:
+            out["notes"].append(f"O {cpu['name']} já é o processador mais forte da base para o soquete {cpu['socket']}.")
+        elif not out["cpu"]:
+            out["notes"].append("Processador mais forte nesta placa quase não muda o FPS: a placa de vídeo é quem limita.")
+    ref = gpu["score"] if gpu else (cpu["igpu"] if cpu else 0)
+    gc = [_suggestion(b, "gpu", p["id"], d, idx) for p in d.parts["gpu"] if p["score"] > ref * 1.08]
+    out["gpu"] = pick_tiers(gc, 5.0)
+    if gc and not out["gpu"]:
+        out["notes"].append("Placa de vídeo mais forte quase não muda o FPS nesta resolução: o processador é quem limita.")
+    if ram and mobo:
+        rc = []
+        for p in d.parts["ram"]:
+            if p["type"] != ram["type"] or bool(p.get("reg")) != bool(ram.get("reg")) and not mobo.get("reg") or p["sticks"] > mobo["slots"] or p["gb"] > mobo["max_mem"]:
+                continue
+            better = p["gb"] > ram["gb"] or (p["sticks"] >= 2 and ram["sticks"] == 1) or p["speed"] >= ram["speed"] + 400
+            worse = p["gb"] < ram["gb"] or p["speed"] < ram["speed"] - 200 or (p["sticks"] == 1 and ram["sticks"] > 1)
+            if better and not worse:
+                rc.append(_suggestion(b, "ram", p["id"], d, idx))
+        rc.sort(key=lambda c: (-round(c["gain"]), c["cost"] or 0))
+        out["ram"] = [dict(c, tier="memória") for c in rc if c["gain"] >= 1][:2]
+        if ram["sticks"] == 1:
+            out["notes"].append("Um pente só: colocar o segundo pente igual (dual channel) é o upgrade mais barato que existe.")
+    if cpu and cool:
+        if cool["capacity"] < cpu["max_w"] or airflow(b, d)["cpu_throttle"]:
+            cc = [p for p in d.parts["cooler"] if cpu["socket"] in p["sockets"] and p["capacity"] >= cpu["max_w"] and p["capacity"] > cool["capacity"]]
+            sug = [_suggestion(b, "cooler", p["id"], d, idx) for p in cc]
+            sug = [c for c in sug if not c["errors"]]
+            sug.sort(key=lambda c: (c["cost"] or 0, C_cap(d, c["id"])))
+            out["cooler"] = [dict(c, tier="cooler") for c in sug[:2]]
+    if st and st["kind"] != "nvme":
+        tgt = "sn850x-1tb" if (mobo or {}).get("m2", 1) else "870evo-1tb"
+        if st["kind"] == "hdd" or tgt != "870evo-1tb":
+            s_ = _suggestion(b, "storage", tgt, d, idx)
+            out["storage"] = [dict(s_, tier="carregamento", note=f"Não muda o FPS, mas o carregamento fica ~{round((1 - 1 / LOAD_FACTOR[st['kind']]) * 100)}% mais rápido.")]
+    return out
+
+
+def C_cap(d: DB, pid: str) -> float:
+    p = d.get("cooler", pid)
+    return p["capacity"] if p else 0
+
+
+PLATFORM_TARGETS = {"AM5", "AM4", "LGA1851", "LGA1700"}
+
+
+def suggest_platform(b: dict, d: DB | None = None, idx: dict | None = None) -> dict:
+    """Troca de plataforma (processador + placa-mae + memoria, e o que mais precisar), em ate 3 niveis:
+    entrada (o mais barato que ja melhora bem), equilibrado e topo. O ganho e calculado com a placa de video atual;
+    'cpu_gain' mostra quanto o processador sozinho rende quando ele e quem limita."""
+    d = d or db()
+    cpu = part(b, "cpu", d)
+    plat = platform_of(b, d)
+    cur = cpu["score"] if cpu else 0
+    pool = [p for p in d.parts["cpu"] if p["socket"] in PLATFORM_TARGETS and p["socket"] not in plat["sockets"] and p["score"] >= cur * 1.15 + 3]
+    picks = {}
+    if pool:
+        pool.sort(key=lambda p: p["score"])
+        picks["entrada"] = next((p for p in pool if p["score"] >= max(cur * 1.25, 55)), pool[0])
+        picks["equilibrado"] = min(pool, key=lambda p: abs(p["score"] - max(80, cur * 1.5)))
+        picks["topo"] = pool[-1]
+    tiers, seen = [], set()
+    for tier in ("entrada", "equilibrado", "topo"):
+        p = picks.get(tier)
+        if not p or p["id"] in seen:
+            continue
+        seen.add(p["id"])
+        sgg = _suggestion(b, "cpu", p["id"], d, idx)
+        if sgg["errors"]:
+            continue
+        sgg.update(tier=tier, cpu_gain=(p["score"] / cur - 1) * 100 if cur else 0.0)
+        tiers.append(sgg)
+    rows = estimate_all(b, d=d) if cpu else []
+    n_gpu = sum(1 for _, e in rows if e["limit"] == "GPU")
+    note = ""
+    if rows and n_gpu > len(rows) * 0.6:
+        note = (f"A placa de vídeo limita em {n_gpu} de {len(rows)} jogos nesta resolução: trocar a plataforma rende pouco agora. "
+                "O ganho do processador aparece quando a GPU também for trocada (ou em resolução/qualidade menor).")
+    if not pool:
+        note = "Você já está numa plataforma de ponta: não há processador de outra plataforma na base que seja bem mais forte."
+    return {"tiers": tiers, "note": note, "current": plat}
 
 
 # ================================================================ escolha passo a passo e busca
@@ -628,7 +781,7 @@ def report(b: dict, d: DB | None = None) -> str:
     L = [f"{APP_NAME} // RELATÓRIO DA MONTAGEM", "Tudo aqui é ESTIMATIVA de um modelo simples (veja o README), não medição.", ""]
     L.append("PEÇAS")
     for c in CATS:
-        L.append(f"  {CAT_NAME[c]:<24} {d.name(c, b['parts'].get(c)) if b['parts'].get(c) else ('(vídeo integrado)' if c == 'gpu' else '—')}")
+        L.append(f"  {CAT_NAME[c]:<24} {part_name(b, c, d=d) if b['parts'].get(c) else ('(vídeo integrado)' if c == 'gpu' else '—')}")
     rows = estimate_all(b, res, q, d)
     L += ["", f"DESEMPENHO ESPERADO · {res} · qualidade {QUALITY_NAME[q].lower()}"]
     for g, e in rows:
@@ -670,8 +823,11 @@ def load_build(path: Path = BUILD_FILE, d: DB | None = None) -> dict:
     d = d or db()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        b = new_build({c: v for c, v in raw.get("parts", {}).items() if c in CATS and d.get(c, v)}, d)
-        for k in ("ambient", "res", "quality", "radiator"):
+        custom = {c: v for c, v in (raw.get("custom") or {}).items() if c in CATS and isinstance(v, dict)}
+        b = new_build({c: v for c, v in raw.get("parts", {}).items() if c in CATS and (d.get(c, v) or (str(v).startswith("pc:") and c in custom))}, d)
+        if custom:
+            b["custom"] = custom
+        for k in ("ambient", "res", "quality", "radiator", "from_pc"):
             if k in raw:
                 b[k] = raw[k]
         if isinstance(raw.get("fans"), dict):

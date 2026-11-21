@@ -27,6 +27,8 @@ jobs:
           test -s "$RUNNER_TEMP/tela.png"
       - name: Compatibilidade, estimativa, airflow, upgrade e escolha passo a passo
         run: timeout 60 python tests/test_simulador.py
+      - name: Leitura do PC e sugestoes de upgrade
+        run: timeout 60 python tests/test_upgrade_pc.py
       - name: Precos no app (historico, veredito, cache)
         run: timeout 60 python tests/test_precos.py
       - name: Coletor de precos (PHP)

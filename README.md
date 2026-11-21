@@ -17,11 +17,17 @@ passando por AMD FX/Phenom (AM3/AM3+), APUs FM2+ e as gerações Intel de LGA115
 | **01 Montagem** | Escolha **passo a passo** (processador → placa-mãe → memória → cooler → vídeo → gabinete → fonte → disco): cada passo só mostra o que encaixa no que já foi escolhido, com **busca** (`xeon`, `am3`, `lga1155`, `rtx 3060`, `ddr3`, `16gb`...), foto e preço. Trocar de plataforma desmarca o que deixou de servir. Modelos prontos: entrada, intermediário, topo, kit Xeon X99, PC antigo e AMD FX. Confere soquete (inclusive AM3 em placa AM3+ e LGA1151 de 6ª/7ª × 8ª/9ª geração), DDR3/DDR4/DDR5, memória de servidor ECC REG, slots e limite de RAM, tamanho da placa-mãe, comprimento da GPU, altura do cooler ou radiador, formato e potência da fonte, e avisa de processador sem AVX ou com poucos núcleos |
 | **02 Desempenho** | FPS e 1% low em 20 jogos, por resolução (1080p, 1440p, 4K) e qualidade (baixo a ultra), quem limita (CPU ou GPU), o tamanho do gargalo e avisos de falta de VRAM |
 | **03 Airflow** | Fans em cada posição (frente, topo, traseira, fundo, lateral), com quantidade, tamanho (80, 92, 120, 140 ou 200 mm, conforme o gabinete) e direção. Mostra pressão positiva/negativa, fluxo, ar interno, temperatura da CPU (jogando e em carga total) e da GPU, e um diagrama do gabinete. Com water cooler, escolhe onde fica o radiador |
-| **04 Upgrade** | Escolha a peça nova e veja o ganho médio e jogo a jogo, as **trocas obrigatórias** (CPU de outro soquete pede placa-mãe nova, DDR5 pede RAM nova, GPU grande pede fonte maior ou gabinete com espaço, processador forte pede cooler melhor) e as temperaturas e o consumo antes e depois. **Aplicar na montagem** leva tudo para a aba 01 |
+| **04 Upgrade** | **Lê as peças deste PC** (processador, placa-mãe, memória com a velocidade real, discos e placa de vídeo, sem precisar de senha) e, com um clique, usa como montagem atual. Sugere **upgrades reais na mesma plataforma** (mesmo soquete e mesma memória): placa de vídeo, processador que serve na placa-mãe atual, memória (dual channel, mais GB), cooler e SSD, em níveis (passo pequeno, equilibrado, máximo e o melhor custo-benefício quando há preço), com o ganho de FPS, o custo e as trocas obrigatórias (ex.: fonte maior). O botão **Sugerir troca de plataforma** mostra processador + placa-mãe + memória de uma plataforma mais nova em três níveis, e avisa quando a placa de vídeo limita e a troca rende pouco agora. **Simular outra peça** continua para qualquer troca |
 | **05 Preços** | Menor preço de cada peça hoje e a loja, total da montagem, **histórico** (gráfico de 90+ dias) e se o preço está **baixo, normal ou alto** para o histórico. Botão **Comprar** com o link de afiliado da loja mais barata. A aba Upgrade mostra o custo estimado do upgrade |
 | **06 Relatório** | Peças, desempenho, temperaturas, consumo, fonte recomendada, preços e avisos num texto só, para copiar ou salvar em .txt |
 
 A montagem fica salva em `~/.config/arasaka-techie/montagem.json`.
+
+**Leitura do PC:** `/proc/cpuinfo`, `/sys/class/dmi/id` (placa-mãe), `udevadm info -e` (pentes de memória:
+tipo, tamanho, quantidade e velocidade configurada), `lsblk` (discos), `nvidia-smi` e `lspci` (placa de vídeo).
+O que não está na base (ex.: uma placa-mãe diferente) entra como peça "do seu PC", montada com o que foi lido.
+Fonte, gabinete e cooler o sistema não informa: ficam os da montagem atual. Se a memória estiver bem abaixo da
+velocidade normal do tipo, o Techie avisa que ativar o EXPO/XMP na BIOS dá FPS de graça.
 
 ## O modelo
 
@@ -67,6 +73,7 @@ custo a mais para quem compra).
 
 ```bash
 python3 tests/test_simulador.py
+python3 tests/test_upgrade_pc.py
 python3 tests/test_precos.py
 php tests/test_coletor.php
 ```

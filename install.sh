@@ -44,7 +44,7 @@ if [ "$YES" -eq 0 ]; then
 fi
 
 step "Pacotes do sistema"
-PKGS=(python3-venv python3-pip libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0
+PKGS=(pciutils python3-venv python3-pip libxcb-cursor0 libxkbcommon-x11-0 libxcb-icccm4 libxcb-keysyms1 libxcb-image0
       libxcb-render-util0 libxcb-xinerama0 libxcb-shape0 libegl1 libnotify-bin)
 MISSING=()
 for p in "${PKGS[@]}"; do dpkg -s "$p" >/dev/null 2>&1 || MISSING+=("$p"); done

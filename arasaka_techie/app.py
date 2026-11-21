@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget,
                                QVBoxLayout, QWidget)
 
-from . import core, fx, prices
+from . import core, fx, hw, prices
 from .core import APP_NAME, CAT_NAME, CATS, POS_NAME, VERSION
 from .kit import BG2, FG, LINE, MUTED, RED, CutFrame, Page, SidebarBrand, button, label, load_fonts, spaced, stylesheet
 
@@ -605,7 +605,7 @@ class BuildPage(Page):
         b = self.win.build
         for i, cat in enumerate(core.STEPS):
             pid = b["parts"].get(cat)
-            name = core.db().name(cat, pid) if pid else ("vídeo integrado" if cat == "gpu" and b["parts"].get("cpu") and core.part(b, "cpu")["igpu"] and self.step != "gpu" and core.next_step(b) != "gpu" else "—")
+            name = core.part_name(b, cat) if pid else ("vídeo integrado" if cat == "gpu" and b["parts"].get("cpu") and core.part(b, "cpu")["igpu"] and self.step != "gpu" and core.next_step(b) != "gpu" else "—")
             btn = self.step_btn[cat]
             short = btn.fontMetrics().elidedText(name, Qt.ElideRight, max(40, btn.width() - 20))
             btn.setText(f"{i + 1:02d} {STEP_NAME[cat]}\n{short}")
@@ -785,7 +785,7 @@ class PricesPage(Page):
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addWidget(label(CAT_NAME[cat].upper(), "muted", 2, 10, True))
-        col.addWidget(label(core.db().name(cat, pid), None, 0.5, 13, True, wrap=True))
+        col.addWidget(label(core.part_name(self.win.build, cat, pid), None, 0.5, 13, True, wrap=True))
         lay.addLayout(col, 1)
         if pr and isinstance(pr.get("price"), (int, float)):
             r = QVBoxLayout()
@@ -803,7 +803,7 @@ class PricesPage(Page):
     def show_part(self, cat, pid):
         self.sel = (cat, pid)
         clear(self.detail)
-        self.detail.addWidget(label(f"{CAT_NAME[cat].upper()} · {core.db().name(cat, pid)}", "section", 2, 12, True, wrap=True))
+        self.detail.addWidget(label(f"{CAT_NAME[cat].upper()} · {core.part_name(self.win.build, cat, pid)}", "section", 2, 12, True, wrap=True))
         self.detail.addWidget(label("■  Carregando histórico...", "muted"))
         self.task = Task(prices.part, pid).start()
         self.task.done.connect(lambda r, c=cat, p=pid: self._part_loaded(c, p, r))
@@ -812,7 +812,7 @@ class PricesPage(Page):
         if self.sel != (cat, pid):
             return
         clear(self.detail)
-        self.detail.addWidget(label(f"{CAT_NAME[cat].upper()} · {core.db().name(cat, pid)}", "section", 2, 12, True, wrap=True))
+        self.detail.addWidget(label(f"{CAT_NAME[cat].upper()} · {core.part_name(self.win.build, cat, pid)}", "section", 2, 12, True, wrap=True))
         data, stale = (None, True) if isinstance(r, Exception) else r
         if not data:
             self.detail.addWidget(issue_card({"level": "info", "text": "Sem dados de preço para esta peça (servidor fora do ar ou peça ainda não coletada)."}))
@@ -909,7 +909,7 @@ class PerfPage(Page):
             return
         rows = core.estimate_all(b)
         gpu = core.part(b, "gpu")
-        self.head.setText(f"{core.db().name('cpu', b['parts']['cpu'])}  +  {gpu['name'] if gpu else 'vídeo integrado'}\n{core.bottleneck_summary(rows)}")
+        self.head.setText(f"{core.part_name(b, 'cpu')}  +  {gpu['name'] if gpu else 'vídeo integrado'}\n{core.bottleneck_summary(rows)}")
         spaced(self.head, 1, 13, True)
         scale = max(240, max(e["fps"] for _, e in rows) * 1.05)
         for c, h in enumerate(["JOGO", "", "FPS", "1% LOW", "LIMITA", "GARGALO"]):
@@ -1076,8 +1076,24 @@ class AirPage(Page):
 
 class UpgradePage(Page):
     def __init__(self, win):
-        super().__init__(win, "UPGRADE", "Escolha a peça nova e veja o ganho e o que mais precisa trocar junto", "TECHIE://CHROME")
+        super().__init__(win, "UPGRADE", "Upgrades reais para as peças do seu PC: na mesma plataforma ou trocando de plataforma", "TECHIE://CHROME")
         self.lay.addWidget(banner())
+        self.pc_box = QVBoxLayout()
+        self.pc_box.setSpacing(8)
+        self.lay.addLayout(self.pc_box)
+        self.same_box = QVBoxLayout()
+        self.same_box.setSpacing(8)
+        self.lay.addLayout(self.same_box)
+        prow = QHBoxLayout()
+        self.plat_btn = button("SUGERIR TROCA DE PLATAFORMA", "primary", self.show_platform,
+                               "Processador + placa-mãe + memória de uma plataforma mais nova, com o ganho e o custo")
+        prow.addWidget(self.plat_btn)
+        prow.addStretch()
+        self.lay.addLayout(prow)
+        self.plat_box = QVBoxLayout()
+        self.plat_box.setSpacing(8)
+        self.lay.addLayout(self.plat_box)
+        self.lay.addWidget(label("SIMULAR OUTRA PECA", "section", 2, 12, True))
         row = QHBoxLayout()
         self.cat = QComboBox()
         for c in CATS:
@@ -1089,13 +1105,174 @@ class UpgradePage(Page):
         row.addWidget(self.cat)
         row.addWidget(label("POR", "muted", 2, 11, True))
         row.addWidget(self.pick, 1)
-        row.addWidget(button("SIMULAR", "primary", self.run))
+        row.addWidget(button("SIMULAR", None, self.run))
         self.lay.addLayout(row)
         self.out = QVBoxLayout()
         self.out.setSpacing(10)
         self.lay.addLayout(self.out)
         self.lay.addStretch()
         self.result = None
+        self.det = None
+        self.det_task = None
+        self.plat_open = False
+
+    # ---- seu PC
+    def detect(self):
+        if self.det_task:
+            return
+        self.det = "lendo"
+        self.render_pc()
+        self.det_task = Task(hw.detect).start()
+        self.det_task.done.connect(self._detected)
+
+    def _detected(self, r):
+        self.det_task = None
+        self.det = None if isinstance(r, Exception) else r
+        if isinstance(r, Exception):
+            self.win.toast(f"Não consegui ler o PC: {r}")
+        self.render_pc()
+
+    def use_pc(self):
+        if isinstance(self.det, dict):
+            self.win.set_build(hw.apply(self.win.build, self.det))
+            self.win.toast("Montagem atual = as peças deste PC")
+
+    def render_pc(self):
+        clear(self.pc_box)
+        c = CutFrame(cut=12)
+        c.set_border(RED)
+        lay = QVBoxLayout(c)
+        lay.setContentsMargins(18, 12, 18, 14)
+        lay.setSpacing(6)
+        top = QHBoxLayout()
+        top.addWidget(label("SEU PC", "muted", 2, 11, True))
+        top.addStretch()
+        b = self.win.build
+        if self.det == "lendo":
+            lay.addLayout(top)
+            lay.addWidget(label("■  Lendo processador, placa-mãe, memória, discos e placa de vídeo...", "muted"))
+            self.pc_box.addWidget(c)
+            return
+        if isinstance(self.det, dict):
+            same = all(b["parts"].get(k) == v for k, v in self.det["parts"].items()) and b.get("from_pc")
+            top.addWidget(button("LER DE NOVO", "ghost", self.detect))
+            if not same:
+                top.addWidget(button("USAR AS PECAS DESTE PC", "primary", self.use_pc))
+            lay.addLayout(top)
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(14)
+            grid.setVerticalSpacing(3)
+            rows = [("cpu", "cpu"), ("mobo", "board"), ("ram", "ram"), ("gpu", "gpu"), ("storage", "storage")]
+            for r, (cat, key) in enumerate(rows):
+                seen = self.det["found"].get(key, "")
+                pid = self.det["parts"].get(cat)
+                if pid and pid.startswith("pc:"):
+                    res, obj = "lido do PC (não está na base)", "muted"
+                elif pid:
+                    res, obj = "→ " + core.db().name(cat, pid), "ok"
+                elif cat == "gpu" and pid == "":
+                    res, obj = "vídeo integrado", "muted"
+                else:
+                    res, obj = "não reconhecido: escolha na Montagem", "warn"
+                grid.addWidget(label(CAT_NAME[cat].upper(), "dim", 2, 10, True), r, 0)
+                grid.addWidget(label(seen or "—", None, 0.5, 12), r, 1)
+                grid.addWidget(label(res, obj, 0.5, 12, wrap=True), r, 2)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 1)
+            lay.addLayout(grid)
+            for n in self.det["notes"]:
+                lay.addWidget(label("› " + n, "dim", 0.5, 11, wrap=True))
+            if same:
+                lay.addWidget(label("■ A montagem atual é este PC: as sugestões abaixo partem dele.", "ok", 1, 11, True))
+        else:
+            top.addWidget(button("LER AS PECAS DESTE PC", "primary", self.detect))
+            lay.addLayout(top)
+            lay.addWidget(label("As sugestões partem da montagem atual (aba Montagem). Leia as peças deste PC para ver upgrades de verdade para ele.", "muted", 0.5, wrap=True))
+        cur = " + ".join(core.part_name(b, k) for k in ("cpu", "gpu") if b["parts"].get(k)) or "nenhuma peça"
+        lay.addWidget(label(f"Base das sugestões: {cur} · {b['res']} {core.QUALITY_NAME[b['quality']].lower()} (mude na aba Desempenho).", "dim", 0.5, 11, wrap=True))
+        self.pc_box.addWidget(c)
+
+    # ---- sugestoes
+    def sugg_card(self, sg: dict, platform: bool = False) -> CutFrame:
+        d = core.db()
+        c = CutFrame(cut=10)
+        lay = QHBoxLayout(c)
+        lay.setContentsMargins(12, 8, 14, 8)
+        lay.setSpacing(14)
+        th = Thumb(sg["cat"], 48)
+        pr = self.win.price_index.get(sg["id"])
+        if pr and pr.get("image"):
+            self.win.images.request(pr["image"], th)
+        lay.addWidget(th)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        col.addWidget(label(sg["tier"].upper(), "dim", 2, 10, True))
+        col.addWidget(label(d.name(sg["cat"], sg["id"]), None, 0.5, 13, True, wrap=True))
+        if sg["changes"]:
+            col.addWidget(label(("Junto: " if platform else "Precisa trocar também: ") + "; ".join(f"{CAT_NAME[x['cat']].lower()} → {d.name(x['cat'], x['new'])}" for x in sg["changes"]),
+                                "warn" if not platform else "muted", 0.5, 11, wrap=True))
+        warns = [i["text"] for i in sg["warnings"] if i["code"] in ("cooler_cap", "psu_rec", "gpu_tight", "ram_low", "ram_single")]
+        if warns:
+            col.addWidget(label("Atenção: " + " ".join(warns), "dim", 0.5, 11, wrap=True))
+        if sg.get("note"):
+            col.addWidget(label(sg["note"], "muted", 0.5, 11, wrap=True))
+        lay.addLayout(col, 1)
+        right = QVBoxLayout()
+        right.setSpacing(2)
+        g = sg["gain"]
+        right.addWidget(label(f"{g:+.0f}% FPS", "ok" if g > 1 else "muted", 1, 16, True), 0, Qt.AlignRight)
+        if platform and sg.get("cpu_gain") is not None:
+            right.addWidget(label(f"processador {sg['cpu_gain']:+.0f}%", "dim", 0.5, 11), 0, Qt.AlignRight)
+        if sg["cost"]:
+            right.addWidget(label(("≈ " if sg["no_price"] else "") + prices.brl(sg["cost"]), None, 1, 12, True), 0, Qt.AlignRight)
+            if sg["no_price"]:
+                right.addWidget(label(f"{sg['no_price']} peça(s) sem preço", "dim", 0.5, 10), 0, Qt.AlignRight)
+        lay.addLayout(right)
+        lay.addWidget(button("DETALHES", None, lambda s=sg: self.run(s["cat"], s["id"])))
+        return c
+
+    def render_same(self):
+        clear(self.same_box)
+        b = self.win.build
+        if not core.part(b, "cpu"):
+            self.same_box.addWidget(label("Escolha (ou leia do PC) pelo menos o processador para ver sugestões.", "muted"))
+            return
+        plat = core.platform_of(b)
+        s = core.suggest_same_platform(b, idx=self.win.price_index)
+        self.same_box.addWidget(label(f"NA MESMA PLATAFORMA  ·  {'/'.join(plat['sockets'])}  ·  {plat['mem'] or '—'}", "section", 2, 12, True))
+        any_ = False
+        for cat, title in (("gpu", "PLACA DE VIDEO"), ("cpu", "PROCESSADOR (MESMA PLACA-MAE)"), ("ram", "MEMORIA"), ("cooler", "COOLER"), ("storage", "ARMAZENAMENTO")):
+            if not s[cat]:
+                continue
+            any_ = True
+            self.same_box.addWidget(label(title, "muted", 2, 11, True))
+            for sg in s[cat]:
+                self.same_box.addWidget(self.sugg_card(sg))
+        for n in s["notes"]:
+            self.same_box.addWidget(issue_card({"level": "info", "text": n}))
+        if not any_:
+            self.same_box.addWidget(issue_card({"level": "info", "text": "Nada na base rende mais nesta plataforma: a montagem já está no limite dela."}))
+
+    def show_platform(self):
+        self.plat_open = not self.plat_open
+        self.render_platform()
+
+    def render_platform(self):
+        clear(self.plat_box)
+        self.plat_btn.setText("ESCONDER TROCA DE PLATAFORMA" if self.plat_open else "SUGERIR TROCA DE PLATAFORMA")
+        if not self.plat_open:
+            return
+        b = self.win.build
+        if not core.part(b, "cpu"):
+            return
+        r = core.suggest_platform(b, idx=self.win.price_index)
+        self.plat_box.addWidget(label("TROCA DE PLATAFORMA  ·  processador + placa-mãe + memória", "section", 2, 12, True))
+        if r["note"]:
+            self.plat_box.addWidget(issue_card({"level": "aviso" if r["tiers"] else "info", "text": r["note"]}))
+        for sg in r["tiers"]:
+            self.plat_box.addWidget(self.sugg_card(sg, platform=True))
+        if r["tiers"]:
+            self.plat_box.addWidget(label("O custo não desconta a venda das peças antigas. \"Processador\" = quanto ele rende a mais quando é ele que limita.", "dim", 0.5, 11, wrap=True))
 
     def fill(self):
         cat = self.cat.currentData()
@@ -1115,9 +1292,13 @@ class UpgradePage(Page):
     def refresh(self):
         self.fill()
         clear(self.out)
-        cur = core.db().name("cpu", self.win.build["parts"].get("cpu")), core.db().name("gpu", self.win.build["parts"].get("gpu"))
-        self.out.addWidget(label(f"Montagem atual: {cur[0]} + {cur[1] if cur[1] != '—' else 'vídeo integrado'} · comparação em "
-                                 f"{self.win.build['res']} {core.QUALITY_NAME[self.win.build['quality']].lower()} (mude na aba Desempenho).", "muted", 0.5, wrap=True))
+        self.result = None
+        if self.det is None and not self.det_task and not self.win.build.get("from_pc"):
+            self.detect()
+        else:
+            self.render_pc()
+        self.render_same()
+        self.render_platform()
 
     def run(self, cat=None, new=None):
         cat = cat or self.cat.currentData()
@@ -1134,7 +1315,7 @@ class UpgradePage(Page):
         lay = QVBoxLayout(c)
         lay.setContentsMargins(18, 14, 18, 14)
         lay.addWidget(label("TROCA ESCOLHIDA", "muted", 2, 11, True))
-        lay.addWidget(label(f"{CAT_NAME[cat]}: {d.name(cat, old)}  →  {d.name(cat, new)}", None, 1, 14, True, wrap=True))
+        lay.addWidget(label(f"{CAT_NAME[cat]}: {core.part_name(self.win.build, cat, old) if old else 'nenhuma'}  →  {d.name(cat, new)}", None, 1, 14, True, wrap=True))
         g = r["avg_gain"]
         big = label(f"{g:+.0f}%", "ok" if g > 1 else ("red" if g < -1 else "muted"), 1, 34, True)
         lay.addWidget(big)
@@ -1150,7 +1331,7 @@ class UpgradePage(Page):
         self.out.addWidget(label("TROCAS OBRIGATORIAS", "section", 2, 12, True))
         if r["changes"]:
             for ch in r["changes"]:
-                self.out.addWidget(issue_card({"level": "aviso", "text": f"{CAT_NAME[ch['cat']]}: {d.name(ch['cat'], ch['old']) if ch['old'] else 'nenhuma'}  →  "
+                self.out.addWidget(issue_card({"level": "aviso", "text": f"{CAT_NAME[ch['cat']]}: {core.part_name(self.win.build, ch['cat'], ch['old']) if ch['old'] else 'nenhuma'}  →  "
                                                                          f"{d.name(ch['cat'], ch['new'])}\nPor quê: {ch['reason']}. (Sugestão: outra peça equivalente também serve.)"}))
         else:
             self.out.addWidget(issue_card({"level": "info", "text": "Nenhuma: a peça nova encaixa na montagem atual."}))

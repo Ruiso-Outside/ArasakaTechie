@@ -1,0 +1,11 @@
+loop0      0                4096 
+loop1      0            63639552 
+loop2      0           498053120 
+loop3      0            96141312 
+loop4      0           215195648 
+loop5      0            34091008 
+loop6      0           496091136 
+sda        0 sata   480103981056 MCR-RPRF-480GB
+sdb        0 sata   120034123776 SSD 120GB
+nvme1n1    0 nvme   500107862016 WD_BLACK SN770 500GB
+nvme0n1    0 nvme   512110190592 Micron_3400_MTFDKBA512TFH
