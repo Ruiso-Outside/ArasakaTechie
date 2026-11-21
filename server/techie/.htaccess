@@ -1,0 +1,5 @@
+# so api.php e coletar.php respondem pelo navegador
+<FilesMatch "^(lib\.php|config\.php|config\.example\.php|parts\.json|ofertas-manuais.*\.json)$">
+  Require all denied
+</FilesMatch>
+Options -Indexes

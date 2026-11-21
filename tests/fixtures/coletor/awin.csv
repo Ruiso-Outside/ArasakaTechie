@@ -1,0 +1,8 @@
+aw_deep_link,product_name,aw_image_url,search_price,merchant_name
+https://www.awin1.com/pclick.php?p=1&a=99&m=1,"Placa de Vídeo RTX 4060 Ventus 2X Black 8GB GDDR6 MSI",https://images.example/4060.jpg,"1.799,90",KaBuM!
+https://www.awin1.com/pclick.php?p=2&a=99&m=1,"Placa de Vídeo MSI RTX 4060 Ti Ventus 2X 8GB",https://images.example/4060ti.jpg,2399.90,KaBuM!
+https://www.awin1.com/pclick.php?p=3&a=99&m=1,"Cooler para RTX 4060 ventoinha reposição",https://images.example/fan.jpg,59.90,KaBuM!
+https://www.awin1.com/pclick.php?p=4&a=99&m=1,"Processador AMD Ryzen 5 7600, 3.8GHz (5.1GHz Turbo), AM5",https://images.example/7600.jpg,"1.099,00",KaBuM!
+https://www.awin1.com/pclick.php?p=5&a=99&m=1,"Processador AMD Ryzen 5 7600X AM5",https://images.example/7600x.jpg,"1.249,00",KaBuM!
+http://inseguro.example/x,"Processador AMD Ryzen 5 7600 AM5",,999.00,Loja Ruim
+https://www.awin1.com/pclick.php?p=6&a=99&m=1,"Memória Kingston Fury Beast 16GB DDR4 3200MHz CL16 KF432C16BB1/16",https://images.example/ram.jpg,229.90,KaBuM!

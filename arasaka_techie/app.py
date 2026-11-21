@@ -4,14 +4,17 @@ ARASAKA TECHIE // interface (PySide6 / Qt 6): montagem, desempenho, airflow, upg
 from __future__ import annotations
 
 import copy
+import math
 import sys
+import threading
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-                               QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
-from . import core, fx
+from . import core, fx, prices
 from .core import APP_NAME, CAT_NAME, CATS, POS_NAME, VERSION
 from .kit import BG2, FG, LINE, MUTED, RED, CutFrame, Page, SidebarBrand, button, label, load_fonts, spaced, stylesheet
 
@@ -24,6 +27,13 @@ QPlainTextEdit#report { background: #030304; border: 1px solid #2a2a31; color: #
 QLabel#warn { color: #e0a030; font-weight: 700; }
 QLabel#ok { color: #4fd18b; font-weight: 700; }
 QLabel#big { font-size: 30px; font-weight: 700; }
+QPushButton#step { text-align: left; padding: 7px 9px; font-size: 11px; color: #8c8c96; background: #0b0b0e; border: 1px solid #1d1d22; border-bottom: 2px solid #1d1d22; }
+QPushButton#step[done="true"] { color: #ececf0; border-bottom: 2px solid #5a080e; }
+QPushButton#step:checked { color: #ffffff; background: rgba(227,18,31,0.16); border: 1px solid #e3121f; border-bottom: 2px solid #e3121f; }
+QFrame#opt { background: #0b0b0e; border: 1px solid #1d1d22; }
+QFrame#opt:hover { border-color: #e3121f; background: #160709; }
+QFrame#opt[chosen="true"] { border: 1px solid #4fd18b; background: #07140d; }
+QFrame#opt[bad="true"] { background: #09090b; }
 """
 LEVEL_COLOR = {"erro": QColor(170, 14, 26), "aviso": QColor(150, 110, 20), "info": LINE}
 LEVEL_TXT = {"erro": "INCOMPATIVEL", "aviso": "ATENCAO", "info": "INFO"}
@@ -265,33 +275,293 @@ class CaseDiagram(QWidget):
 
 
 # ================================================================ paginas
+class Task(QObject):
+    """Roda algo demorado (rede) numa thread daemon e devolve o resultado na thread da interface."""
+    done = Signal(object)
+
+    def __init__(self, fn, *args):
+        super().__init__()
+        self.fn, self.args = fn, args
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+        return self
+
+    def _run(self):
+        try:
+            r = self.fn(*self.args)
+        except Exception as e:  # noqa: BLE001
+            r = e
+        try:
+            self.done.emit(r)
+        except RuntimeError:
+            pass
+
+
+class Images(QObject):
+    """Fotos das pecas (vindas das lojas pelo servidor de precos), com cache em disco."""
+    got = Signal(str, bytes)
+
+    def __init__(self):
+        super().__init__()
+        self.pix: dict[str, QPixmap] = {}
+        self.waiting: dict[str, list] = {}
+        self.got.connect(self._got)
+
+    def request(self, url: str, thumb: "Thumb"):
+        if not url:
+            return
+        if url in self.pix:
+            thumb.set_pixmap(self.pix[url])
+            return
+        first = url not in self.waiting
+        self.waiting.setdefault(url, []).append(thumb)
+        if first:
+            threading.Thread(target=lambda: self._load(url), daemon=True).start()
+
+    def _load(self, url):
+        data = prices.fetch_image(url) or b""
+        try:
+            self.got.emit(url, data)
+        except RuntimeError:
+            pass
+
+    def _got(self, url, data):
+        pm = QPixmap()
+        if data and pm.loadFromData(data):
+            self.pix[url] = pm
+        for t in self.waiting.pop(url, []):
+            try:
+                if url in self.pix:
+                    t.set_pixmap(self.pix[url])
+            except RuntimeError:
+                pass                    # o widget ja foi apagado
+
+
+class Thumb(QWidget):
+    """Foto da peca; sem foto, um desenho da categoria."""
+
+    def __init__(self, cat: str, size: int = 64):
+        super().__init__()
+        self.cat, self.pm = cat, None
+        self.setFixedSize(size, size)
+
+    def set_pixmap(self, pm: QPixmap):
+        self.pm = pm
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(8, 8, 10))
+        p.setPen(QPen(LINE, 1))
+        p.drawRect(0, 0, w - 1, h - 1)
+        if self.pm and not self.pm.isNull():
+            p.fillRect(1, 1, w - 2, h - 2, QColor(236, 236, 240))
+            pm = self.pm.scaled(w - 6, h - 6, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            p.drawPixmap((w - pm.width()) // 2, (h - pm.height()) // 2, pm)
+            return
+        s = w / 64
+        p.scale(s, s)
+        pen = QPen(QColor(150, 150, 160), 2)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        c = self.cat
+        if c == "cpu":
+            p.drawRect(18, 18, 28, 28)
+            p.setPen(QPen(RED, 2))
+            p.drawRect(25, 25, 14, 14)
+            p.setPen(pen)
+            for i in range(4):
+                for (x1, y1, x2, y2) in ((22 + i * 7, 12, 22 + i * 7, 18), (22 + i * 7, 46, 22 + i * 7, 52), (12, 22 + i * 7, 18, 22 + i * 7), (46, 22 + i * 7, 52, 22 + i * 7)):
+                    p.drawLine(x1, y1, x2, y2)
+        elif c == "gpu":
+            p.drawRect(6, 20, 52, 22)
+            p.drawEllipse(QPointF(22, 31), 8, 8)
+            p.drawEllipse(QPointF(42, 31), 8, 8)
+            p.setPen(QPen(RED, 2))
+            p.drawLine(14, 46, 40, 46)
+        elif c == "ram":
+            p.drawRect(6, 24, 52, 16)
+            p.setPen(QPen(RED, 2))
+            for i in range(5):
+                p.drawRect(10 + i * 9, 28, 6, 8)
+            p.setPen(pen)
+            for i in range(10):
+                p.drawLine(9 + i * 5, 40, 9 + i * 5, 44)
+        elif c == "mobo":
+            p.drawRect(10, 8, 44, 48)
+            p.setPen(QPen(RED, 2))
+            p.drawRect(18, 14, 14, 14)
+            p.setPen(pen)
+            p.drawLine(38, 12, 38, 30)
+            p.drawLine(42, 12, 42, 30)
+            p.drawLine(16, 38, 48, 38)
+            p.drawLine(16, 46, 48, 46)
+        elif c == "storage":
+            p.drawRect(8, 22, 48, 20)
+            p.setPen(QPen(RED, 2))
+            p.drawRect(12, 27, 14, 10)
+            p.setPen(pen)
+            p.drawEllipse(QPointF(48, 32), 3, 3)
+        elif c == "psu":
+            p.drawRect(10, 14, 44, 36)
+            p.drawEllipse(QPointF(32, 32), 12, 12)
+            p.setPen(QPen(RED, 2))
+            p.drawLine(26, 32, 38, 32)
+            p.drawLine(32, 26, 32, 38)
+        elif c == "case":
+            p.drawRect(18, 6, 28, 52)
+            p.setPen(QPen(RED, 2))
+            p.drawEllipse(QPointF(32, 22), 7, 7)
+            p.drawEllipse(QPointF(32, 40), 7, 7)
+        else:
+            p.drawEllipse(QPointF(32, 32), 18, 18)
+            p.setPen(QPen(RED, 2))
+            for i in range(6):
+                p.drawLine(QPointF(32, 32), QPointF(32 + 15 * math.cos(i * math.pi / 3), 32 + 15 * math.sin(i * math.pi / 3)))
+
+
+def verdict_chip(level: str) -> QLabel:
+    txt = {"baixo": "PRECO BAIXO", "normal": "PRECO NORMAL", "alto": "PRECO ALTO", "curto": "HISTORICO CURTO"}.get(level, "")
+    col = {"baixo": "#4fd18b", "normal": "#8c8c96", "alto": "#ff3b47", "curto": "#55555e"}.get(level, "#55555e")
+    lb = label(txt, None, 1.5, 10, True)
+    lb.setStyleSheet(f"color:{col}; border:1px solid {col}; padding:2px 6px;")
+    return lb
+
+
+class OptionRow(QFrame):
+    """Uma peca na lista da escolha passo a passo."""
+
+    def __init__(self, page, cat: str, opt: dict, chosen: bool, price: dict | None):
+        super().__init__()
+        self.setObjectName("opt")
+        self.setProperty("chosen", chosen)
+        self.setProperty("bad", not opt["ok"])
+        self.setCursor(Qt.PointingHandCursor)
+        self.page, self.cat, self.pid = page, cat, opt["part"]["id"]
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 8, 14, 8)
+        lay.setSpacing(14)
+        th = Thumb(cat, 56)
+        if price and price.get("image"):
+            page.win.images.request(price["image"], th)
+        lay.addWidget(th)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        p = opt["part"]
+        col.addWidget(label(p["name"], None, 0.5, 14, True, wrap=True))
+        col.addWidget(label(spec_line(cat, p), "muted", 0.5, 12, wrap=True))
+        if not opt["ok"]:
+            col.addWidget(label("INCOMPATIVEL: " + opt["why"], "red", 0.5, 11, wrap=True))
+        lay.addLayout(col, 1)
+        right = QVBoxLayout()
+        right.setSpacing(4)
+        if chosen:
+            right.addWidget(label("■ ESCOLHIDA", "ok", 2, 11, True), 0, Qt.AlignRight)
+        if price and isinstance(price.get("price"), (int, float)):
+            right.addWidget(label(prices.brl(price["price"]), None, 1, 14, True), 0, Qt.AlignRight)
+            right.addWidget(label(price.get("store", ""), "dim", 0.5, 11), 0, Qt.AlignRight)
+            if price.get("verdict") in ("baixo", "alto"):
+                right.addWidget(verdict_chip(price["verdict"]), 0, Qt.AlignRight)
+        lay.addLayout(right)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.page.choose(self.cat, self.pid)
+
+
+def spec_line(cat: str, p: dict) -> str:
+    yr = f"  ·  {p['year']}" if p.get("year") else ""
+    if cat == "cpu":
+        return f"{p['socket']}  ·  {p['cores']} núcleos / {p['threads']} threads  ·  até {p['boost']} GHz  ·  {'/'.join(p['mem'])}  ·  {p['max_w']} W" + \
+            (f"  ·  vídeo {p.get('igpu_name', 'integrado')}" if p["igpu"] else "  ·  sem vídeo integrado") + yr
+    if cat == "mobo":
+        return f"{'/'.join(core.mobo_sockets(p))}  ·  {p['chipset']}  ·  {p['form']}  ·  {p['mem']} ({p['slots']} slots, até {p['max_mem']} GB)" + \
+            ("  ·  aceita memória de servidor" if p.get("reg") else "")
+    if cat == "ram":
+        return f"{p['type']}  ·  {p['gb']} GB em {p['sticks']} pente(s)  ·  {p['speed']} MT/s CL{p['cl']}" + ("  ·  ECC REG (só placa de Xeon)" if p.get("reg") else "")
+    if cat == "gpu":
+        return f"{p['vram']} GB  ·  {p['power']} W  ·  {p['length']} mm  ·  fonte de {p['rec_psu']} W" + yr
+    if cat == "psu":
+        return f"{p['watts']} W  ·  {p['rating']}  ·  {p['form']}"
+    if cat == "case":
+        return f"{', '.join(p['forms'])}  ·  GPU até {p['gpu_max']} mm  ·  cooler até {p['cooler_max']} mm  ·  fonte {p['psu']}"
+    if cat == "cooler":
+        return (f"water cooler, radiador {p['radiator']} mm" if p["kind"] == "aio" else f"ar, {p['height']} mm de altura") + \
+            f"  ·  dissipa ≈{p['capacity']} W  ·  {', '.join(p['sockets'][:6])}{'…' if len(p['sockets']) > 6 else ''}"
+    if cat == "storage":
+        return f"{p['kind'].upper()}  ·  {p['gb']} GB  ·  leitura {p['read']} MB/s"
+    return ""
+
+
+STEP_NAME = {"cpu": "CPU", "mobo": "PLACA-MÃE", "ram": "MEMÓRIA", "cooler": "COOLER", "gpu": "VÍDEO", "case": "GABINETE", "psu": "FONTE", "storage": "DISCO"}
+
+
 class BuildPage(Page):
+    """Escolha passo a passo: cada passo mostra o que e compativel com o que ja foi escolhido."""
+
     def __init__(self, win):
-        super().__init__(win, "MONTAGEM", "Escolha as peças: a compatibilidade é conferida na hora", "TECHIE://BUILD")
+        super().__init__(win, "MONTAGEM", "Escolha peça por peça: cada passo mostra o que encaixa no que você já escolheu", "TECHIE://BUILD")
+        self.step = "cpu"
+        steps = QHBoxLayout()
+        steps.setSpacing(4)
+        self.step_btn: dict[str, QPushButton] = {}
+        self.step_grp = QButtonGroup(self)
+        for i, cat in enumerate(core.STEPS):
+            b = QPushButton()
+            b.setObjectName("step")
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            b.setMinimumHeight(46)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, c=cat: self.go_step(c))
+            self.step_grp.addButton(b, i)
+            self.step_btn[cat] = b
+            steps.addWidget(b, 1)
+        self.lay.addLayout(steps)
         row = QHBoxLayout()
-        row.addWidget(label("MODELO PRONTO", "muted", 2, 11, True))
-        self.preset = QComboBox()
-        for pr in core.db().presets:
-            self.preset.addItem(pr["name"], pr["id"])
-        row.addWidget(self.preset)
-        row.addWidget(button("CARREGAR", None, self.load_preset))
-        row.addStretch()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Buscar:  xeon,  am3,  lga1155,  rtx 3060,  ddr3,  16gb,  2011 ...")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda _t: self.timer.start(180))
+        row.addWidget(self.search, 1)
+        self.show_bad = QCheckBox("Mostrar incompatíveis")
+        self.show_bad.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.show_bad.toggled.connect(lambda _v: self.fill())
+        row.addWidget(self.show_bad)
+        self.no_gpu = button("SEM PLACA DE VIDEO", None, lambda: self.choose("gpu", ""))
+        row.addWidget(self.no_gpu)
         self.lay.addLayout(row)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(8)
-        self.combos: dict[str, QComboBox] = {}
-        for r, cat in enumerate(CATS):
-            grid.addWidget(label(CAT_NAME[cat].upper(), "muted", 2, 11, True), r, 0)
-            cb = QComboBox()
-            cb.addItem("Nenhuma (vídeo integrado)" if cat == "gpu" else "— escolher —", "")
-            for p in core.db().parts[cat]:
-                cb.addItem(part_label(cat, p), p["id"])
-            cb.currentIndexChanged.connect(lambda _i, c=cat: self.changed(c))
-            self.combos[cat] = cb
-            grid.addWidget(cb, r, 1)
-        grid.setColumnStretch(1, 1)
-        self.lay.addLayout(grid)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fill)
+        self.count = label("", "dim", 1, 11)
+        self.lay.addWidget(self.count)
+        self.list_box = QVBoxLayout()
+        self.list_box.setSpacing(6)
+        holder = QWidget()
+        holder.setObjectName("page")
+        holder.setLayout(self.list_box)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.NoFrame)
+        sc.setWidget(holder)
+        sc.setMinimumHeight(430)
+        self.list_scroll = sc
+        self.lay.addWidget(sc)
+        pr = QHBoxLayout()
+        pr.addWidget(label("MODELO PRONTO", "muted", 2, 11, True))
+        self.preset = QComboBox()
+        for p in core.db().presets:
+            self.preset.addItem(p["name"], p["id"])
+        pr.addWidget(self.preset)
+        pr.addWidget(button("CARREGAR", None, self.load_preset))
+        pr.addStretch()
+        pr.addWidget(button("COMECAR DO ZERO", "ghost", self.reset))
+        self.lay.addLayout(pr)
         self.summary = QHBoxLayout()
         self.lay.addLayout(self.summary)
         self.issues = QVBoxLayout()
@@ -299,27 +569,78 @@ class BuildPage(Page):
         self.lay.addLayout(self.issues)
         self.lay.addStretch()
 
+    # ---- acoes
     def load_preset(self):
         self.win.set_build(core.from_preset(self.preset.currentData()))
         self.win.toast(f"Montagem: {self.preset.currentText()}")
 
-    def changed(self, cat):
-        if getattr(self, "_filling", False):
-            return
+    def reset(self):
+        b = core.new_build({})
+        b["res"], b["quality"], b["ambient"] = self.win.build["res"], self.win.build["quality"], self.win.build["ambient"]
+        self.win.set_build(b)
+        self.go_step("cpu")
+
+    def go_step(self, cat):
+        self.step = cat
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.refresh()
+
+    def choose(self, cat, pid):
         b = self.win.build
-        b["parts"][cat] = self.combos[cat].currentData() or ""
-        if cat in ("case", "cooler"):
-            core.reset_fans(b)
+        cleared = core.pick(b, cat, pid)
         self.win.save()
-        self.render()
+        if cleared:
+            self.win.toast("Desmarcado por incompatibilidade: " + ", ".join(CAT_NAME[c].lower() for c in cleared) + ". Escolha de novo.")
+        nxt = core.next_step(b, cat)
+        self.step = cleared[0] if cleared else (nxt or cat)
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.refresh()
+
+    # ---- desenho
+    def steps_text(self):
+        b = self.win.build
+        for i, cat in enumerate(core.STEPS):
+            pid = b["parts"].get(cat)
+            name = core.db().name(cat, pid) if pid else ("vídeo integrado" if cat == "gpu" and b["parts"].get("cpu") and core.part(b, "cpu")["igpu"] and self.step != "gpu" and core.next_step(b) != "gpu" else "—")
+            btn = self.step_btn[cat]
+            short = btn.fontMetrics().elidedText(name, Qt.ElideRight, max(40, btn.width() - 20))
+            btn.setText(f"{i + 1:02d} {STEP_NAME[cat]}\n{short}")
+            btn.setToolTip(name)
+            btn.setProperty("done", bool(pid))
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.setChecked(cat == self.step)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.steps_text()
 
     def refresh(self):
-        self._filling = True
-        for cat, cb in self.combos.items():
-            i = cb.findData(self.win.build["parts"].get(cat, ""))
-            cb.setCurrentIndex(max(0, i))
-        self._filling = False
+        self.steps_text()
+        self.no_gpu.setVisible(self.step == "gpu")
+        self.fill()
         self.render()
+
+    def fill(self):
+        clear(self.list_box)
+        b, cat = self.win.build, self.step
+        opts = core.options(b, cat, self.search.text())
+        n_ok = sum(1 for o in opts if o["ok"])
+        shown = opts if self.show_bad.isChecked() else [o for o in opts if o["ok"] or o["part"]["id"] == b["parts"].get(cat)]
+        idx = self.win.price_index
+        self.count.setText(f"{CAT_NAME[cat].upper()}  ·  {n_ok} compatível(is)" + (f"  ·  {len(opts) - n_ok} escondida(s) por incompatibilidade (marque Mostrar incompatíveis para trocar de plataforma)" if len(opts) > n_ok and not self.show_bad.isChecked() else "")
+                           + ("  ·  clique para escolher" if shown else ""))
+        spaced(self.count, 1.5, 11, True)
+        for o in shown[:150]:
+            self.list_box.addWidget(OptionRow(self, cat, o, o["part"]["id"] == b["parts"].get(cat), idx.get(o["part"]["id"])))
+        if not shown:
+            self.list_box.addWidget(label("Nada encontrado. Tente outra busca ou marque \"Mostrar incompatíveis\".", "muted", 1, wrap=True))
+        self.list_box.addStretch()
+        self.list_scroll.verticalScrollBar().setValue(0)
 
     def render(self):
         b = self.win.build
@@ -329,16 +650,209 @@ class BuildPage(Page):
         iss = core.check(b)
         n_err = len(core.errors(iss))
         self.summary.addWidget(stat("COMPATIBILIDADE", "OK" if not n_err else f"{n_err} ERRO(S)", "ok" if not n_err else "red"))
-        self.summary.addWidget(stat("CONSUMO JOGANDO", f"≈{pw['game']} W", sub=f"pico ≈{pw['peak']} W"))
-        psu = core.part(b, "psu")
-        self.summary.addWidget(stat("FONTE RECOMENDADA", f"{pw['recommended']} W", sub=f"escolhida: {psu['watts']} W" if psu else "nenhuma escolhida"))
-        rows = core.estimate_all(b)
-        avg = round(sum(e["fps"] for _, e in rows) / len(rows)) if rows and core.part(b, "cpu") else 0
-        self.summary.addWidget(stat(f"MEDIA {b['res']} {core.QUALITY_NAME[b['quality']].upper()}", f"{avg} FPS" if avg else "—", sub="estimativa, 16 jogos"))
+        self.summary.addWidget(stat("CONSUMO JOGANDO", f"≈{pw['game']} W", sub=f"pico ≈{pw['peak']} W · fonte recomendada {pw['recommended']} W"))
+        rows = core.estimate_all(b) if core.part(b, "cpu") else []
+        avg = round(sum(e["fps"] for _, e in rows) / len(rows)) if rows else 0
+        self.summary.addWidget(stat(f"MEDIA {b['res']} {core.QUALITY_NAME[b['quality']].upper()}", f"{avg} FPS" if avg else "—", sub=f"estimativa, {len(core.db().games)} jogos"))
+        total, missing = prices.build_total(b["parts"], self.win.price_index)
+        self.summary.addWidget(stat("PRECO DA MONTAGEM", prices.brl(total) if total else "—",
+                                    sub=("menor preço de cada peça" + (f" · sem preço: {len(missing)}" if missing else "")) if total else "preços: aba PRECOS"))
         for i in sorted(iss, key=lambda x: ["erro", "aviso", "info"].index(x["level"])):
-            self.issues.addWidget(issue_card(i))
+            if i["code"] != "missing":
+                self.issues.addWidget(issue_card(i))
+        miss = [i for i in iss if i["code"] == "missing"]
+        if miss:
+            self.issues.addWidget(issue_card({"level": "info", "text": "Falta escolher: " + ", ".join(CAT_NAME[i["parts"][0]].lower() for i in miss) + "."}))
         if not iss:
-            self.issues.addWidget(issue_card({"level": "info", "text": "Tudo compatível. Veja o desempenho, o airflow e o relatório nas outras abas."}))
+            self.issues.addWidget(issue_card({"level": "info", "text": "Tudo compatível. Veja o desempenho, o airflow, os preços e o relatório nas outras abas."}))
+
+
+class HistoryChart(QWidget):
+    """Grafico do menor preco por dia, com a mediana tracejada."""
+
+    def __init__(self):
+        super().__init__()
+        self.hist, self.med = [], None
+        self.setMinimumHeight(220)
+
+    def set_data(self, hist: list[dict], median: float | None):
+        self.hist, self.med = hist[-180:], median
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(5, 5, 6))
+        p.setPen(QPen(LINE, 1))
+        p.drawRect(0, 0, w - 1, h - 1)
+        f = QFont(p.font())
+        f.setPixelSize(11)
+        p.setFont(f)
+        if len(self.hist) < 2:
+            p.setPen(MUTED)
+            p.drawText(self.rect(), Qt.AlignCenter, "Sem histórico suficiente ainda: o coletor guarda um ponto por dia.")
+            return
+        vals = [x["min"] for x in self.hist]
+        lo, hi = min(vals), max(vals)
+        if hi - lo < 1:
+            lo, hi = lo - 1, hi + 1
+        pad_l, pad_r, pad_t, pad_b = 74, 14, 14, 26
+        cw, ch = w - pad_l - pad_r, h - pad_t - pad_b
+
+        def pt(i, v):
+            return QPointF(pad_l + cw * i / (len(vals) - 1), pad_t + ch * (1 - (v - lo) / (hi - lo)))
+        p.setPen(QColor(85, 85, 94))
+        for k in range(3):
+            v = lo + (hi - lo) * k / 2
+            y = pt(0, v).y()
+            p.drawText(QRectF(0, y - 8, pad_l - 8, 16), Qt.AlignRight | Qt.AlignVCenter, prices.brl(v))
+            p.setPen(QPen(QColor(25, 25, 30), 1))
+            p.drawLine(QPointF(pad_l, y), QPointF(w - pad_r, y))
+            p.setPen(QColor(85, 85, 94))
+        p.drawText(QRectF(pad_l, h - 20, 120, 16), Qt.AlignLeft, self.hist[0]["d"])
+        p.drawText(QRectF(w - pad_r - 120, h - 20, 120, 16), Qt.AlignRight, self.hist[-1]["d"])
+        if self.med:
+            pen = QPen(QColor(140, 140, 150), 1)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            y = pt(0, self.med).y()
+            p.drawLine(QPointF(pad_l, y), QPointF(w - pad_r, y))
+            p.drawText(QRectF(pad_l + 4, y - 16, 160, 14), Qt.AlignLeft, "mediana")
+        poly = QPolygonF([pt(i, v) for i, v in enumerate(vals)])
+        p.setPen(QPen(RED, 2))
+        p.drawPolyline(poly)
+        last = pt(len(vals) - 1, vals[-1])
+        p.setBrush(RED)
+        p.drawEllipse(last, 4, 4)
+
+
+class PricesPage(Page):
+    def __init__(self, win):
+        super().__init__(win, "PRECOS", "Menor preço de cada peça, histórico e se está caro ou barato agora", "TECHIE://MARKET")
+        disc = label(prices.DISCLOSURE, "warn", 0.5, 12, False, wrap=True)
+        disc.setStyleSheet("border:1px solid #5a4210; background:#120d04; padding:8px 12px;")
+        self.lay.addWidget(disc)
+        top = QHBoxLayout()
+        self.status = label("", "muted", 0.5, 12, wrap=True)
+        top.addWidget(self.status, 1)
+        top.addWidget(button("ATUALIZAR PRECOS", None, lambda: self.win.load_prices(True)))
+        self.lay.addLayout(top)
+        self.total = QHBoxLayout()
+        self.lay.addLayout(self.total)
+        self.rows = QVBoxLayout()
+        self.rows.setSpacing(6)
+        self.lay.addLayout(self.rows)
+        self.detail = QVBoxLayout()
+        self.detail.setSpacing(8)
+        self.lay.addLayout(self.detail)
+        self.lay.addStretch()
+        self.sel = None
+        self.task = None
+
+    def refresh(self):
+        b, idx = self.win.build, self.win.price_index
+        clear(self.rows)
+        clear(self.total)
+        st = self.win.price_state
+        self.status.setText({"carregando": "■  Buscando preços no servidor...",
+                             "offline": "Sem conexão com o servidor de preços" + (" · mostrando o último cache." if idx else ": ainda não há preços salvos."),
+                             "ok": f"Preços do coletor piphin.online · atualizado {self.win.price_updated or '—'} · uma coleta por dia nas lojas parceiras."}.get(st, ""))
+        total, missing = prices.build_total(b["parts"], idx)
+        self.total.addWidget(stat("TOTAL DA MONTAGEM", prices.brl(total) if total else "—", sub="somando o menor preço de cada peça"))
+        self.total.addWidget(stat("PECAS SEM PRECO", str(len(missing)), sub=", ".join(CAT_NAME[c].lower() for c in missing) if missing else "nenhuma"))
+        for cat in core.STEPS:
+            pid = b["parts"].get(cat)
+            if not pid:
+                continue
+            self.rows.addWidget(self.part_row(cat, pid, idx.get(pid)))
+        if not any(b["parts"].values()):
+            self.rows.addWidget(label("Escolha as peças na aba Montagem.", "muted"))
+        if self.sel and b["parts"].get(self.sel[0]) == self.sel[1]:
+            self.show_part(*self.sel)
+        else:
+            clear(self.detail)
+
+    def part_row(self, cat, pid, pr):
+        c = CutFrame(cut=10)
+        lay = QHBoxLayout(c)
+        lay.setContentsMargins(12, 8, 14, 8)
+        lay.setSpacing(14)
+        th = Thumb(cat, 52)
+        if pr and pr.get("image"):
+            self.win.images.request(pr["image"], th)
+        lay.addWidget(th)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        col.addWidget(label(CAT_NAME[cat].upper(), "muted", 2, 10, True))
+        col.addWidget(label(core.db().name(cat, pid), None, 0.5, 13, True, wrap=True))
+        lay.addLayout(col, 1)
+        if pr and isinstance(pr.get("price"), (int, float)):
+            r = QVBoxLayout()
+            r.setSpacing(2)
+            r.addWidget(label(prices.brl(pr["price"]), None, 1, 15, True), 0, Qt.AlignRight)
+            r.addWidget(label(pr.get("store", ""), "dim", 0.5, 11), 0, Qt.AlignRight)
+            lay.addLayout(r)
+            if pr.get("verdict"):
+                lay.addWidget(verdict_chip(pr["verdict"]))
+        else:
+            lay.addWidget(label("sem preço", "dim"))
+        lay.addWidget(button("HISTORICO E LOJAS", None, lambda: self.show_part(cat, pid)))
+        return c
+
+    def show_part(self, cat, pid):
+        self.sel = (cat, pid)
+        clear(self.detail)
+        self.detail.addWidget(label(f"{CAT_NAME[cat].upper()} · {core.db().name(cat, pid)}", "section", 2, 12, True, wrap=True))
+        self.detail.addWidget(label("■  Carregando histórico...", "muted"))
+        self.task = Task(prices.part, pid).start()
+        self.task.done.connect(lambda r, c=cat, p=pid: self._part_loaded(c, p, r))
+
+    def _part_loaded(self, cat, pid, r):
+        if self.sel != (cat, pid):
+            return
+        clear(self.detail)
+        self.detail.addWidget(label(f"{CAT_NAME[cat].upper()} · {core.db().name(cat, pid)}", "section", 2, 12, True, wrap=True))
+        data, stale = (None, True) if isinstance(r, Exception) else r
+        if not data:
+            self.detail.addWidget(issue_card({"level": "info", "text": "Sem dados de preço para esta peça (servidor fora do ar ou peça ainda não coletada)."}))
+            return
+        offers = data.get("offers", [])
+        cur = next((o["price"] for o in offers if isinstance(o.get("price"), (int, float))), None)
+        v = prices.verdict(data.get("history", []), cur)
+        row = QHBoxLayout()
+        row.addWidget(stat("MENOR PRECO HOJE", prices.brl(cur), "ok" if v["level"] == "baixo" else ("red" if v["level"] == "alto" else None)))
+        row.addWidget(stat("MENOR EM 90 DIAS", prices.brl(v["min"])))
+        row.addWidget(stat("MEDIANA", prices.brl(v["median"])))
+        row.addWidget(stat("MAIOR EM 90 DIAS", prices.brl(v["max"])))
+        self.detail.addLayout(row)
+        vl = QHBoxLayout()
+        vl.addWidget(verdict_chip(v["level"]))
+        vl.addWidget(label(v["text"], None, 0.5, 13, wrap=True), 1)
+        self.detail.addLayout(vl)
+        ch = HistoryChart()
+        ch.set_data(data.get("history", []), v["median"])
+        self.detail.addWidget(ch)
+        if stale:
+            self.detail.addWidget(label("Dados do cache (sem conexão com o servidor agora).", "dim"))
+        self.detail.addWidget(label("ONDE COMPRAR", "muted", 2, 11, True))
+        for k, o in enumerate(offers[:12]):
+            c = CutFrame(cut=8)
+            lay = QHBoxLayout(c)
+            lay.setContentsMargins(12, 6, 12, 6)
+            lay.addWidget(label(o.get("store", "loja"), None, 1, 12, True))
+            t = o.get("title", "")
+            lay.addWidget(label(t if len(t) < 90 else t[:89] + "…", "muted", 0.5, 11), 1)
+            lay.addWidget(label(prices.brl(o.get("price")) if o.get("price") is not None else "ver preço na loja", None, 1, 13, True))
+            lay.addWidget(button("COMPRAR ↗" if o.get("price") is not None else "VER NA LOJA ↗", "primary" if k == 0 and o.get("price") is not None else None,
+                                 lambda u=o["url"]: self.open(u)))
+            self.detail.addWidget(c)
+        if not offers:
+            self.detail.addWidget(label("Nenhuma loja com oferta para esta peça agora.", "muted"))
+
+    def open(self, url):
+        if prices.safe_url(url):
+            QDesktopServices.openUrl(QUrl(url))
 
 
 class PerfPage(Page):
@@ -625,6 +1139,13 @@ class UpgradePage(Page):
         big = label(f"{g:+.0f}%", "ok" if g > 1 else ("red" if g < -1 else "muted"), 1, 34, True)
         lay.addWidget(big)
         lay.addWidget(label(f"ganho médio de FPS nos {len(r['games'])} jogos ({self.win.build['res']}, {core.QUALITY_NAME[self.win.build['quality']].lower()})", "muted"))
+        idx = self.win.price_index
+        buy = [new] + [ch["new"] for ch in r["changes"]]
+        known = [idx[x]["price"] for x in buy if isinstance((idx.get(x) or {}).get("price"), (int, float))]
+        if known:
+            miss = len(buy) - len(known)
+            lay.addWidget(label(f"Custo estimado: {prices.brl(sum(known))} (peça nova" + (" + trocas obrigatórias" if r["changes"] else "") + ", menor preço"
+                                + (f"; {miss} peça(s) sem preço" if miss else "") + "). Vendendo as peças antigas, sai mais barato.", None, 0.5, 13, True, wrap=True))
         self.out.addWidget(c)
         self.out.addWidget(label("TROCAS OBRIGATORIAS", "section", 2, 12, True))
         if r["changes"]:
@@ -689,7 +1210,8 @@ class ReportPage(Page):
         self.lay.addLayout(row)
 
     def refresh(self):
-        self.text.setPlainText(core.report(self.win.build))
+        b = self.win.build
+        self.text.setPlainText(core.report(b) + prices.report_section(b["parts"], self.win.price_index, CAT_NAME, core.db().name))
 
     def copy(self):
         QGuiApplication.clipboard().setText(self.text.toPlainText())
@@ -710,6 +1232,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1240, 860)
         self.build = core.load_build()
+        self.images = Images()
+        self.price_index, self.price_state, self.price_updated, self._price_task = {}, "carregando", "", None
         root = QWidget()
         h = QHBoxLayout(root)
         h.setContentsMargins(0, 0, 0, 0)
@@ -724,8 +1248,10 @@ class MainWindow(QMainWindow):
         sl.addSpacing(10)
         self.nav = QButtonGroup(self)
         self.stack = QStackedWidget()
-        self.pages = {"build": BuildPage(self), "perf": PerfPage(self), "air": AirPage(self), "upgrade": UpgradePage(self), "report": ReportPage(self)}
-        for i, (key, text) in enumerate([("build", "MONTAGEM"), ("perf", "DESEMPENHO"), ("air", "AIRFLOW"), ("upgrade", "UPGRADE"), ("report", "RELATORIO")]):
+        self.pages = {"build": BuildPage(self), "perf": PerfPage(self), "air": AirPage(self), "upgrade": UpgradePage(self),
+                      "prices": PricesPage(self), "report": ReportPage(self)}
+        for i, (key, text) in enumerate([("build", "MONTAGEM"), ("perf", "DESEMPENHO"), ("air", "AIRFLOW"), ("upgrade", "UPGRADE"),
+                                         ("prices", "PRECOS"), ("report", "RELATORIO")]):
             b = QPushButton(f"{i + 1:02d}   {text}")
             b.setObjectName("nav")
             b.setCheckable(True)
@@ -749,6 +1275,35 @@ class MainWindow(QMainWindow):
         self.toast_lbl.setStyleSheet("background:#000; border:1px solid #e3121f; padding:10px 18px; color:#ececf0;")
         self.toast_lbl.hide()
         self.go("build")
+        self.load_prices()
+
+    def load_prices(self, force=False):
+        if self._price_task:
+            return
+        self.price_state = "carregando"
+        if self.stack.currentWidget() is self.pages["prices"]:
+            self.pages["prices"].refresh()
+
+        def job():
+            idx, stale = prices.index(force)
+            return idx, stale
+        self._price_task = Task(job).start()
+        self._price_task.done.connect(self._prices_loaded)
+
+    def _prices_loaded(self, r):
+        self._price_task = None
+        idx, stale = ({}, True) if isinstance(r, Exception) else r
+        self.price_index = idx
+        self.price_state = "offline" if stale else "ok"
+        try:
+            f = prices.CACHE / "precos-index.json"
+            import json as _j
+            self.price_updated = _j.loads(f.read_text(encoding="utf-8")).get("updated", "") if f.exists() else ""
+        except (OSError, ValueError):
+            self.price_updated = ""
+        page = self.stack.currentWidget()
+        if page in (self.pages["build"], self.pages["prices"]):
+            page.refresh()
 
     def go(self, key: str):
         self.nav.button(list(self.pages).index(key)).setChecked(True)
@@ -795,5 +1350,7 @@ def main(argv: list[str] | None = None):
             QTimer.singleShot(200, lambda: win.go(page))
             if page == "upgrade":
                 QTimer.singleShot(400, lambda: win.pages["upgrade"].run())
+            if page == "prices" and win.build["parts"].get("gpu"):
+                QTimer.singleShot(900, lambda: win.pages["prices"].show_part("gpu", win.build["parts"]["gpu"]))
         QTimer.singleShot(int(next((a.split("=", 1)[1] for a in argv if a.startswith("--delay=")), "2600")), lambda: (win.grab().save(path), app.quit()))
     return app.exec()

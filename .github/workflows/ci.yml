@@ -16,7 +16,7 @@ jobs:
       - name: Sintaxe do Python e dos scripts
         run: |
           python -m compileall -q arasaka_techie
-          for f in *.sh; do bash -n "$f"; done
+          for f in *.sh server/*.sh; do bash -n "$f"; done
       - name: Abre o app sem tela e tira um print
         run: |
           sudo apt-get update -qq
@@ -25,8 +25,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/home"
           QT_QPA_PLATFORM=offscreen HOME="$RUNNER_TEMP/home" timeout 120 python -m arasaka_techie --screenshot="$RUNNER_TEMP/tela.png"
           test -s "$RUNNER_TEMP/tela.png"
-      - name: Compatibilidade, estimativa, airflow e upgrade
+      - name: Compatibilidade, estimativa, airflow, upgrade e escolha passo a passo
         run: timeout 60 python tests/test_simulador.py
+      - name: Precos no app (historico, veredito, cache)
+        run: timeout 60 python tests/test_precos.py
+      - name: Coletor de precos (PHP)
+        run: |
+          for f in server/techie/*.php; do php -l "$f"; done
+          php tests/test_coletor.php
       - uses: actions/upload-artifact@v4
         with:
           name: tela

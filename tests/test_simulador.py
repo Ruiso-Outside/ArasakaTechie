@@ -219,6 +219,48 @@ cats = {c["cat"] for c in u["changes"]}
 assert "mobo" in cats and C.part(u["build"], "mobo")["socket"] == "LGA1700"
 assert "cooler_cap" not in {i["code"] for i in u["issues"]} or C.part(u["build"], "cooler")["capacity"] >= 245
 
+
+# ---------------------------------------------------------------- plataformas antigas e Xeon
+b = C.new_build({"cpu": "phenom-965", "mobo": "m5a97-r2", "ram": "ddr3-2x8-1600"})
+assert "socket" not in errs(b), "placa AM3+ aceita processador AM3"
+assert "no_avx" in codes(b)
+b = C.new_build({"cpu": "fx-8350", "mobo": "a68hm-k"})
+assert "socket" in errs(b)
+b = C.new_build({"cpu": "i5-6500", "mobo": "prime-z390-a"})
+iss = [i for i in C.check(b) if i["code"] == "socket"]
+assert iss and "6ª/7ª" in iss[0]["text"], "LGA1151 de 6a/7a geracao nao entra em placa Z390"
+b = C.new_build({"cpu": "e5-2666v3", "mobo": "x99-mr9a-pro", "ram": "ddr4-2x16-2400-reg"})
+assert not errs(b) - {"no_video"}, "memoria de servidor na placa de Xeon"
+b["parts"]["mobo"] = "b550-tomahawk"
+assert "ram_reg" in errs(b)
+b = C.new_build({"cpu": "e5-2666v3", "mobo": "x99-ad3", "ram": "ddr3-2x8-1600"})
+assert not {"ram_type", "cpu_mem"} & errs(b), "X99 de DDR3"
+assert "few_threads" in codes(C.new_build({"cpu": "e8400"}))
+for pr in ("xeon", "antigo", "fx"):
+    assert not C.errors(C.check(C.from_preset(pr))), pr
+
+# ---------------------------------------------------------------- escolha passo a passo e busca
+b = C.new_build({})
+assert {o["part"]["socket"] for o in C.options(b, "cpu", "xeon")} <= {"LGA2011", "LGA2011-3", "LGA1366", "LGA1150", "LGA1155"}
+assert all(o["part"]["socket"] in ("AM3", "AM3+") for o in C.options(b, "cpu", "am3"))
+assert [o["part"]["id"] for o in C.options(b, "gpu", "rtx 3060")] == ["rtx-3060"]
+assert all(o["part"]["type"] == "DDR3" for o in C.options(b, "ram", "ddr3"))
+assert C.options(b, "cpu", "processador que nao existe") == []
+assert C.norm("Placa-Mãe ÁÉ") == "placa mae ae"
+C.pick(b, "cpu", "fx-8350")
+mobos = C.options(b, "mobo")
+okm = [o["part"]["id"] for o in mobos if o["ok"]]
+assert set(okm) == {"m5a97-r2", "78lmt-usb3"} and mobos[0]["ok"] and not mobos[-1]["ok"] and mobos[-1]["why"]
+assert C.next_step(b, "cpu") == "mobo"
+C.pick(b, "mobo", "m5a97-r2")
+assert all(o["part"]["type"] == "DDR3" for o in C.options(b, "ram") if o["ok"])
+C.pick(b, "ram", "ddr3-2x8-1600")
+assert C.next_step(b, "ram") == "cooler"
+cleared = C.pick(b, "cpu", "r5-5600")        # outra plataforma: placa e memoria saem
+assert set(cleared) == {"mobo", "ram"} and not b["parts"]["mobo"] and not b["parts"]["ram"]
+coolers = [o["part"]["id"] for o in C.options(b, "cooler") if o["ok"]]
+assert "laminar-rm1" not in coolers and "ak400" in coolers
+
 # ---------------------------------------------------------------- relatorio e salvar
 r = C.report(C.from_preset("medio"))
 for s in ("ESTIMATIVA", "DESEMPENHO ESPERADO", "AIRFLOW", "CONSUMO E FONTE", "AVISOS", "Cyberpunk 2077"):

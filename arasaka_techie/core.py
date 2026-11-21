@@ -5,7 +5,7 @@ Tudo aqui e ESTIMATIVA feita com um modelo simples e documentado (veja README e 
 Nao le nada do sistema: so a base local em data/parts.json. Nao depende do Qt, para dar para testar.
 
 MODELO
-- FPS limitado pela GPU = fps_gpu_do_jogo x (score_gpu / 100) x fator_resolucao x fator_qualidade
+- FPS limitado pela GPU = fps_gpu_do_jogo x (score_gpu / 100)^0,85 x fator_resolucao x fator_qualidade
   (fps_gpu_do_jogo = RTX 4090 em 1080p alto). Falta de VRAM derruba o FPS (e causa engasgos).
 - FPS limitado pela CPU = fps_cpu_do_jogo x (score_cpu / 100) x fator_memoria x fator_qualidade_cpu
   (fps_cpu_do_jogo = Ryzen 7 7800X3D). Nao depende da resolucao.
@@ -24,11 +24,12 @@ import copy
 import json
 import math
 import os
+import unicodedata
 from pathlib import Path
 
 APP_ID = "arasaka-techie"
 APP_NAME = "ARASAKA TECHIE"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 HOME = Path.home()
 PKG = Path(__file__).resolve().parent
@@ -58,8 +59,10 @@ FAN_CFM = {80: 30, 92: 40, 120: 55, 140: 68, 200: 110}
 RADIATOR = {240: (120, 2), 280: (140, 2), 360: (120, 3)}
 RAD_PREF = ["top", "front", "side", "bottom"]
 W_PER_CFM_K = 0.000471947 * 1.2 * 1005      # 1 CFM de ar leva ~0,569 W por grau
-TJMAX = {"AM5": 95, "AM4": 90}
-CHIP_OFFSET = {"AM5": 15, "AM4": 10}
+TJMAX = {"AM5": 95, "AM4": 90, "AM3+": 75, "AM3": 75, "FM2+": 80}
+CHIP_OFFSET = {"AM5": 15, "AM4": 10, "AM3+": -20, "AM3": -18, "FM2+": -10}   # FX/Phenom medem bem mais baixo
+GPU_CURVE = 0.85        # pontuacao efetiva = 100 x (score/100)^0.85: placas fracas escalam melhor que linear
+MEM_REF = {"DDR3": 1600, "DDR4": 3200, "DDR5": 6000}
 PSU_SIZES = [450, 550, 650, 750, 850, 1000, 1200, 1500, 1600]
 LOAD_FACTOR = {"nvme": 1.0, "sata": 1.15, "hdd": 2.6}
 
@@ -194,12 +197,15 @@ def check(b: dict, d: DB | None = None) -> list[dict]:
     for c in REQUIRED:
         if not P[c]:
             out.append(issue("info", "missing", f"Falta escolher: {CAT_NAME[c].lower()}.", [c]))
-    if cpu and mobo and cpu["socket"] != mobo["socket"]:
-        out.append(issue("erro", "socket", f"O {cpu['name']} usa soquete {cpu['socket']} e a placa-mãe é {mobo['socket']}.", ["mobo", "cpu"]))
+    if cpu and mobo and cpu["socket"] not in mobo_sockets(mobo):
+        extra = " (8ª/9ª geração e 6ª/7ª geração usam o mesmo encaixe, mas placas diferentes)" if {cpu["socket"], mobo["socket"]} == {"LGA1151", "LGA1151-v2"} else ""
+        out.append(issue("erro", "socket", f"O {cpu['name']} usa soquete {cpu['socket']} e a placa-mãe é {mobo['socket']}{extra}.", ["mobo", "cpu"]))
     if ram and mobo and ram["type"] != mobo["mem"]:
         out.append(issue("erro", "ram_type", f"A placa-mãe aceita {mobo['mem']} e a memória escolhida é {ram['type']}.", ["ram", "mobo"]))
     if ram and cpu and ram["type"] not in cpu["mem"]:
         out.append(issue("erro", "cpu_mem", f"O {cpu['name']} não suporta {ram['type']}.", ["ram", "cpu"]))
+    if ram and mobo and ram.get("reg") and not mobo.get("reg"):
+        out.append(issue("erro", "ram_reg", "Memória de servidor (ECC registrada) só funciona em placas de Xeon (X79/X99): esta placa não liga com ela.", ["ram", "mobo"]))
     if ram and mobo and ram["sticks"] > mobo["slots"]:
         out.append(issue("erro", "ram_slots", f"São {ram['sticks']} pentes e a placa-mãe tem {mobo['slots']} slots.", ["ram"]))
     if ram and mobo and ram["gb"] > mobo["max_mem"]:
@@ -244,6 +250,12 @@ def check(b: dict, d: DB | None = None) -> list[dict]:
             out.append(issue("erro", "psu_w", f"A fonte de {psu['watts']} W é menor que o pico do sistema (~{pw['peak']} W): o PC pode desligar sozinho.", ["psu"]))
         elif psu["watts"] < pw["recommended"]:
             out.append(issue("aviso", "psu_rec", f"A fonte de {psu['watts']} W funciona, mas o recomendado é {pw['recommended']} W (folga para picos da GPU).", ["psu"]))
+    if cpu and not cpu.get("avx", True):
+        out.append(issue("aviso", "no_avx", f"O {cpu['name']} não tem instruções AVX: vários jogos lançados depois de 2020 nem abrem.", []))
+    if cpu and cpu["threads"] <= 2:
+        out.append(issue("aviso", "few_threads", f"{cpu['cores']} núcleo(s) e {cpu['threads']} threads: jogos atuais travam bastante (o mínimo hoje é 4 núcleos/8 threads).", []))
+    elif cpu and cpu["threads"] <= 4:
+        out.append(issue("info", "four_threads", "4 threads: roda, mas jogos novos e pesados engasgam (1% low ruim).", []))
     if ram:
         if ram["gb"] < 16:
             out.append(issue("aviso", "ram_low", f"{ram['gb']} GB de RAM é pouco para jogos atuais (16 GB no mínimo, 32 GB ideal).", []))
@@ -258,6 +270,10 @@ def check(b: dict, d: DB | None = None) -> list[dict]:
         if not any(f["dir"] == "in" for f in fans.values()):
             out.append(issue("aviso", "no_intake", "Nenhum fan de entrada: o ar entra só pelas frestas (e traz poeira).", []))
     return out
+
+
+def mobo_sockets(mobo: dict) -> list[str]:
+    return mobo.get("accepts") or [mobo["socket"]]
 
 
 def errors(issues: list[dict]) -> list[dict]:
@@ -292,7 +308,7 @@ def airflow(b: dict, d: DB | None = None, full_load: bool = False) -> dict:
         pressure = "negativa"
     else:
         pressure = "equilibrada"
-    flow = min(intake, exhaust) + 0.5 * abs(diff) + 5     # +5: conveccao natural e frestas
+    flow = min(intake, exhaust) + 0.5 * abs(diff) + 10    # +10: conveccao natural e frestas
     dirs = {p: f["dir"] for p, f in b["fans"].items() if f["count"]}
     good_in = any(dirs.get(p) == "in" for p in ("front", "bottom", "side"))
     good_out = any(dirs.get(p) == "out" for p in ("rear", "top"))
@@ -339,10 +355,11 @@ def airflow(b: dict, d: DB | None = None, full_load: bool = False) -> dict:
 def mem_factor(ram: dict | None, heavy: bool = False) -> float:
     if not ram:
         return 0.8
-    if ram["type"] == "DDR4":
-        f = 1 + max(-0.15, min(0.06, (ram["speed"] - 3200) / 3200 * 0.25))
+    ref = MEM_REF.get(ram["type"], 3200)
+    if ram["type"] == "DDR5":
+        f = 1 + max(-0.12, min(0.04, (ram["speed"] - ref) / ref * 0.2))
     else:
-        f = 1 + max(-0.12, min(0.04, (ram["speed"] - 6000) / 6000 * 0.2))
+        f = 1 + max(-0.15, min(0.06, (ram["speed"] - ref) / ref * 0.25))
     if ram["sticks"] == 1:
         f *= 0.88
     if ram["gb"] < 16:
@@ -364,11 +381,11 @@ def estimate(b: dict, game: dict, res: str | None = None, quality: str | None = 
         gscore, vram = gpu["score"], gpu["vram"]
     else:
         gscore, vram = cpu["igpu"], min(4, (ram["gb"] if ram else 8) / 4)
-    g = game["gpu_fps"] * gscore / 100 * RES[res] * Q_GPU[quality]
+    g = game["gpu_fps"] * gpu_eff(gscore) / 100 * RES[res] * Q_GPU[quality]
     need = max(1.0, game["vram"] * RES_VRAM[res] + Q_VRAM[quality])
     short = vram < need
     if short:
-        g *= max(0.45, (vram / need) ** 1.5)
+        g *= max(0.6, vram / need)
     if air.get("gpu_throttle"):
         g *= 0.93
     c = game["cpu_fps"] * cpu["score"] / 100 * mem_factor(ram, game["vram"] >= 7) * Q_CPU[quality]
@@ -384,6 +401,10 @@ def estimate(b: dict, game: dict, res: str | None = None, quality: str | None = 
     low = fps * (0.72 if limit == "CPU" else 0.8) * (0.75 if short else 1)
     return {"fps": round(fps), "low": round(low), "gpu_fps": round(g), "cpu_fps": round(c), "limit": limit,
             "bottleneck": bott, "vram_short": short, "vram_need": round(need, 1), "tier": tier(fps)}
+
+
+def gpu_eff(score: float) -> float:
+    return 100 * (max(score, 0.1) / 100) ** GPU_CURVE
 
 
 def tier(fps: float) -> str:
@@ -426,7 +447,7 @@ def _closeness(cat: str, old: dict | None, new: dict, mobo: dict | None = None, 
     if cat == "mobo":
         return (0 if new["form"] == old["form"] else 10) + (0 if ram and new["mem"] == ram["type"] else 5)
     if cat == "ram":
-        return abs(new["gb"] - old["gb"]) * 2 + abs(new["speed"] - old["speed"]) / 400 + (0 if new["sticks"] == old["sticks"] else 3) + (20 if new["gb"] < old["gb"] else 0)
+        return abs(new["gb"] - old["gb"]) * 0.5 + abs(new["speed"] - old["speed"]) / 400 + (6 if new["sticks"] == 1 and old["sticks"] > 1 else 0) + (20 if new["gb"] < old["gb"] else 0)
     if cat == "cooler":
         return abs(new["capacity"] - old["capacity"]) / 20 + (0 if new["kind"] == old["kind"] else 4) + (30 if new["capacity"] < old["capacity"] else 0)
     if cat == "case":
@@ -434,16 +455,16 @@ def _closeness(cat: str, old: dict | None, new: dict, mobo: dict | None = None, 
     return 0
 
 
-FIXABLE = {"socket", "ram_type", "cpu_mem", "ram_slots", "ram_max", "form", "gpu_len", "no_video", "cooler_socket",
+FIXABLE = {"socket", "ram_type", "ram_reg", "cpu_mem", "ram_slots", "ram_max", "form", "gpu_len", "no_video", "cooler_socket",
            "cooler_h", "radiator", "psu_w", "psu_form", "psu_rec", "cooler_cap"}
-REASON = {"socket": "o soquete do processador mudou", "ram_type": "o tipo de memória (DDR4/DDR5) não bate", "cpu_mem": "o processador não aceita esta memória",
+REASON = {"socket": "o soquete do processador mudou", "ram_type": "o tipo de memória (DDR3/DDR4/DDR5) não bate", "ram_reg": "memória de servidor só funciona em placa de Xeon", "cpu_mem": "o processador não aceita esta memória",
           "ram_slots": "faltam slots de memória", "ram_max": "a placa-mãe não aceita tanta RAM", "form": "a placa-mãe não cabe no gabinete",
           "gpu_len": "a placa de vídeo não cabe no gabinete", "no_video": "o processador não tem vídeo integrado", "cooler_socket": "o cooler não encaixa no soquete novo",
           "cooler_h": "o cooler é alto demais para o gabinete", "radiator": "o radiador não cabe no gabinete", "psu_w": "a fonte não aguenta o pico de consumo",
           "psu_form": "o gabinete pede outro formato de fonte", "psu_rec": "a fonte fica sem folga para a peça nova", "cooler_cap": "o cooler não dá conta do processador novo"}
 
 
-REASON_BY_TARGET = {("socket", "cpu"): "a placa-mãe nova usa outro soquete", ("ram_type", "mobo"): "a memória nova é de outro tipo (DDR4/DDR5)",
+REASON_BY_TARGET = {("socket", "cpu"): "a placa-mãe nova usa outro soquete", ("ram_type", "mobo"): "a memória nova é de outro tipo (DDR3/DDR4/DDR5)", ("ram_reg", "mobo"): "a memória nova é de servidor (ECC REG)",
                     ("cpu_mem", "cpu"): "a memória nova não é aceita pelo processador", ("form", "mobo"): "o gabinete novo não aceita este tamanho de placa-mãe",
                     ("gpu_len", "gpu"): "o gabinete novo é curto para a placa de vídeo", ("cooler_h", "case"): "o cooler novo não cabe no gabinete",
                     ("radiator", "cooler"): "o gabinete novo não tem lugar para o radiador", ("psu_form", "case"): "a fonte nova não cabe no gabinete"}
@@ -512,6 +533,92 @@ def upgrade(b: dict, cat: str, new_id: str, d: DB | None = None) -> dict:
     return {"build": nb, "changed": {"cat": cat, "old": b["parts"].get(cat), "new": new_id}, "changes": changes,
             "issues": check(nb, d), "games": gains, "avg_gain": avg,
             "air_before": airflow(b, d), "air_after": airflow(nb, d), "power_before": power(b, d), "power_after": power(nb, d)}
+
+
+# ================================================================ escolha passo a passo e busca
+STEPS = ["cpu", "mobo", "ram", "cooler", "gpu", "case", "psu", "storage"]
+
+
+def norm(text: str) -> str:
+    t = unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode().lower()
+    return " ".join(t.replace("-", " ").replace("_", " ").split())
+
+
+def haystack(cat: str, p: dict) -> str:
+    keys = ("name", "id", "socket", "mem", "type", "form", "chipset", "kind", "rating", "year")
+    bits = [p.get(k) for k in keys if p.get(k) is not None]
+    bits += p.get("accepts", []) + (p["mem"] if isinstance(p.get("mem"), list) else [])
+    if cat == "gpu":
+        bits.append(f"{p['vram']}gb {p['vram']} gb")
+    if cat == "ram":
+        bits.append(f"{p['gb']}gb {p['gb']} gb" + (" ecc reg servidor" if p.get("reg") else ""))
+    if cat == "psu":
+        bits.append(f"{p['watts']}w {p['watts']} w")
+    if cat == "cpu" and p["socket"] in ("LGA2011", "LGA2011-3", "LGA1366"):
+        bits.append("xeon servidor kit x99 x79 chines" if p["socket"] != "LGA1366" else "xeon servidor x58")
+    if cat == "mobo" and p.get("reg"):
+        bits.append("xeon kit chines")
+    return norm(" ".join(str(b) for b in bits if not isinstance(b, list)))
+
+
+def matches(cat: str, p: dict, query: str) -> bool:
+    q = norm(query)
+    if not q:
+        return True
+    hs = haystack(cat, p)
+    return all(tok in hs for tok in q.split())
+
+
+def option_problems(b: dict, cat: str, pid: str, d: DB | None = None) -> list[dict]:
+    """Erros que esta peca causaria com as que ja foram escolhidas."""
+    d = d or db()
+    tb = copy.deepcopy(b)
+    tb["parts"][cat] = pid
+    if cat in ("case", "cooler"):
+        reset_fans(tb, d)
+    mine = [i for i in errors(check(tb, d)) if cat in i["parts"] or (cat == "gpu" and i["code"] == "psu_w")]
+    before = {i["code"] for i in errors(check(b, d))}
+    return [i for i in mine if i["code"] not in before or b["parts"].get(cat) == pid]
+
+
+def options(b: dict, cat: str, query: str = "", d: DB | None = None) -> list[dict]:
+    """Pecas da categoria que batem com a busca, compativeis primeiro (e as mais fortes/novas no topo)."""
+    d = d or db()
+    out = []
+    for p in d.parts[cat]:
+        if not matches(cat, p, query):
+            continue
+        probs = option_problems(b, cat, p["id"], d)
+        out.append({"part": p, "ok": not probs, "why": "; ".join(i["text"] for i in probs)})
+    key = {"cpu": lambda p: -p["score"], "gpu": lambda p: -p["score"], "psu": lambda p: p["watts"], "ram": lambda p: (-p["gb"], -p["speed"]),
+           "cooler": lambda p: -p["capacity"], "storage": lambda p: -p["read"]}.get(cat, lambda p: 0)
+    out.sort(key=lambda o: (not o["ok"], key(o["part"])))
+    return out
+
+
+def pick(b: dict, cat: str, pid: str, d: DB | None = None) -> list[str]:
+    """Escolhe a peca; desmarca as outras que ficaram incompativeis com ela. Devolve as categorias desmarcadas."""
+    d = d or db()
+    b["parts"][cat] = pid
+    if cat in ("case", "cooler"):
+        reset_fans(b, d)
+    cleared = []
+    for _ in range(4):
+        bad = [i for i in errors(check(b, d)) if cat in i["parts"]]
+        others = [c for i in bad for c in i["parts"] if c != cat and b["parts"].get(c) and c not in cleared]
+        if not others:
+            break
+        for c in dict.fromkeys(others):
+            b["parts"][c] = ""
+            cleared.append(c)
+            if c in ("case", "cooler"):
+                reset_fans(b, d)
+    return cleared
+
+
+def next_step(b: dict, after: str | None = None) -> str | None:
+    order = STEPS[STEPS.index(after) + 1:] + STEPS[:STEPS.index(after) + 1] if after else STEPS
+    return next((c for c in order if not b["parts"].get(c) and c != after and (c != "gpu" or after != "gpu")), None)
 
 
 # ================================================================ relatorio

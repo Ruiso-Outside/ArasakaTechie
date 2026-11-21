@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+server/techie/config.php
+server/techie/ofertas-manuais.json
+server/techie/techie-data/
+server/techie/parts.json
+dist/

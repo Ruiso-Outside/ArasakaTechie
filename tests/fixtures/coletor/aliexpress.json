@@ -1,0 +1,5 @@
+{"aliexpress_affiliate_product_query_response": {"resp_result": {"resp_code": 200, "result": {"products": {"product": [
+ {"product_title": "Intel Xeon E5 2666 V3 CPU Processador 2.9GHz 10 Núcleos LGA 2011-3", "target_sale_price": "89.90", "promotion_link": "https://s.click.aliexpress.com/e/_abc", "product_main_image_url": "https://ae01.alicdn.com/kf/xeon.jpg"},
+ {"product_title": "Intel Xeon E5 2667 V3 LGA2011-3", "target_sale_price": "120.00", "promotion_link": "https://s.click.aliexpress.com/e/_def", "product_main_image_url": "https://ae01.alicdn.com/kf/x2.jpg"},
+ {"product_title": "Kit X99 Placa Mae + Xeon E5 2666 V3 + 16GB", "target_sale_price": "450.00", "promotion_link": "https://s.click.aliexpress.com/e/_kit", "product_main_image_url": ""}
+]}}}}}
