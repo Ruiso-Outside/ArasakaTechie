@@ -71,7 +71,7 @@ function norm_text(string $s): string {
 const VARIANTS = ['ti', 'super', 'xt', 'xtx', 'x3d', 'k', 'kf', 'f', 'g', 'x', 'gre', 'le', 'v2', 'v3', 'v4', 'pro', 'max', 'plus', 'se', 'oc'];
 const STOPWORDS = ['amd', 'intel', 'nvidia', 'geforce', 'radeon', 'core', 'ryzen', 'xeon', 'arc', 'the', 'de', 'gb', 'tb', 'e', 'com', 'sem'];
 const NEG = [
-    'cpu' => ['notebook', 'laptop', 'cooler para', 'kit placa', 'combo', 'usado com defeito', 'pc gamer', 'computador'],
+    'cpu' => ['notebook', 'laptop', 'cooler para', 'kit', 'placa mae', 'combo', 'usado com defeito', 'pc gamer', 'computador'],
     'gpu' => ['notebook', 'laptop', 'cooler para', 'ventoinha', 'fan para', 'backplate', 'suporte', 'riser', 'bracket', 'pc gamer', 'computador', 'waterblock'],
     'mobo' => ['kit ', 'combo', 'com processador', 'espelho', 'tampa', 'pc gamer'],
     'ram' => ['notebook', 'sodimm', 'so dimm', 'laptop'],
