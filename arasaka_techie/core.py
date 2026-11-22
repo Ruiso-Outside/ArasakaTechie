@@ -30,7 +30,7 @@ from pathlib import Path
 
 APP_ID = "arasaka-techie"
 APP_NAME = "ARASAKA TECHIE"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 HOME = Path.home()
 

@@ -47,6 +47,8 @@ jobs:
           done
   windows:
     runs-on: windows-latest
+    env:
+      PYTHONIOENCODING: utf-8   # o console do Windows (cp1252) nao imprime o ■ dos testes
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
