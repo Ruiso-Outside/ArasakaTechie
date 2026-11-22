@@ -92,3 +92,8 @@ Rode **sem sudo**. Para remover: `./uninstall.sh`.
 
 Arasaka é marca da CD PROJEKT RED (projeto de fã, sem fins comerciais). Os nomes de peças e jogos são de
 seus fabricantes e estúdios. A fonte `cedge1` usa a licença FontStruct Non-Commercial.
+
+### Windows 10/11
+
+Pela **Arasaka Central** (Loja → Apps), ou extraia o `ArasakaTechie-vX.Y.Z-windows.zip` e dê dois cliques em **`install.bat`**. O instalador instala o Python 3.12 pelo winget (se ainda não houver), cria os atalhos no Menu Iniciar e na Área de Trabalho e o comando `arasaka-techie`. Não precisa de administrador. No Windows as peças do seu PC são lidas pelo WMI (processador, placa-mãe, memória, discos e placa de vídeo, com a VRAM da NVIDIA pelo nvidia-smi).
+Para remover: `powershell -ExecutionPolicy Bypass -File uninstall.ps1` (os seus dados são mantidos).

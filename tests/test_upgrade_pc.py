@@ -103,4 +103,22 @@ assert "placa de vídeo limita" in r["note"], "GTX 750 Ti limita: avisa que a pl
 assert C.suggest_platform(b)["tiers"] == [] and "ponta" in C.suggest_platform(b)["note"]
 tiers = C.pick_tiers([{"id": str(i), "gain": g, "errors": [], "cost": c, "no_price": 0} for i, (g, c) in enumerate([(5, 500), (15, 900), (40, 1500), (80, 6000)])])
 assert [t["tier"] for t in tiers][0] == "custo-benefício" and tiers[-1]["gain"] == 80
+
+# Windows: o JSON da consulta WMI vira o mesmo formato do Linux (enums como texto ou numero)
+import json as _json  # noqa: E402
+win = hw.parse_windows(_json.dumps({
+    "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor ", "board": "MAG X870E TOMAHAWK WIFI (MS-7E59)", "board_vendor": "Micro-Star",
+    "mem": [{"Capacity": 34359738368, "ConfiguredClockSpeed": 6000, "Speed": 4800, "SMBIOSMemoryType": 34, "PartNumber": "CT32G48C40S5 ", "TypeDetail": 128},
+            {"Capacity": 34359738368, "ConfiguredClockSpeed": 6000, "Speed": 4800, "SMBIOSMemoryType": 34, "PartNumber": "CT32G48C40S5", "TypeDetail": 128}],
+    "mem_slots": 4, "mem_max_kb": 134217728,
+    "disks": [{"FriendlyName": "ST2000DM008", "MediaType": "HDD", "BusType": "SATA", "Size": 2000398934016},
+              {"FriendlyName": "WD_BLACK SN770 500GB", "MediaType": 4, "BusType": 17, "Size": 500107862016},
+              {"FriendlyName": "Pendrive", "MediaType": "SSD", "BusType": "USB", "Size": 64000000000}],
+    "video": [{"Name": "NVIDIA GeForce RTX 5070 Ti", "AdapterCompatibility": "NVIDIA"},
+              {"Name": "Microsoft Basic Display Adapter", "AdapterCompatibility": "(Standard display types)"}]}))
+assert win["cpu"] == "AMD Ryzen 9 9950X3D 16-Core Processor" and win["board"].startswith("MAG X870E")
+assert win["mem"] == {"type": "DDR5", "gb": 64, "sticks": 2, "speed": 6000, "part": "CT32G48C40S5", "reg": False, "slots": 4, "max_gb": 128}
+assert [(d["kind"], d["gb"]) for d in win["disks"]] == [("nvme", 500), ("hdd", 2000)], "pendrive USB fica fora"
+assert win["gpus"] == [{"name": "NVIDIA GeForce RTX 5070 Ti", "vendor": "nvidia", "vram": 0}], "adaptador basico fica fora"
+assert hw.parse_windows("") == {"cpu": "", "board": "", "board_vendor": "", "mem": {}, "disks": [], "gpus": []}
 print("■ upgrade do PC: tudo certo")

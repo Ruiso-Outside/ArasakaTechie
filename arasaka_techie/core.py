@@ -24,18 +24,35 @@ import copy
 import json
 import math
 import os
+import sys
 import unicodedata
 from pathlib import Path
 
 APP_ID = "arasaka-techie"
 APP_NAME = "ARASAKA TECHIE"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 HOME = Path.home()
+
+
+def _config_home() -> Path:
+    """Configuracoes: %APPDATA% no Windows, ~/.config (XDG) no Linux. Com a pasta pessoal trocada (testes), fica nela."""
+    if sys.platform == "win32" and HOME == Path.home():
+        return Path(os.environ.get("APPDATA") or HOME)
+    return Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+
+
+def _data_home() -> Path:
+    """Dados: %LOCALAPPDATA% no Windows, ~/.local/share (XDG) no Linux."""
+    if sys.platform == "win32" and HOME == Path.home():
+        return Path(os.environ.get("LOCALAPPDATA") or HOME)
+    return Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share"))
+
+
 PKG = Path(__file__).resolve().parent
 ASSETS = PKG / "assets"
 DATA_FILE = PKG / "data" / "parts.json"
-CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+CONFIG_HOME = _config_home()
 BUILD_FILE = CONFIG_HOME / APP_ID / "montagem.json"
 
 CATS = ["cpu", "mobo", "ram", "gpu", "storage", "psu", "case", "cooler"]

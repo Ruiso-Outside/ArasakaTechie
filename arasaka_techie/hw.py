@@ -2,7 +2,8 @@
 ARASAKA TECHIE // le as pecas do PC (sem root) e casa com a base de pecas.
 
 Fontes (Linux): /proc/cpuinfo, /sys/class/dmi/id (placa-mae), udev (pentes de memoria: tipo, tamanho e
-velocidade configurada), lsblk (discos), nvidia-smi e lspci (placa de video). Fonte, gabinete e cooler o
+velocidade configurada), lsblk (discos), nvidia-smi e lspci (placa de video). No Windows: WMI/CIM
+(Win32_Processor, Win32_BaseBoard, Win32_PhysicalMemory, Get-PhysicalDisk, Win32_VideoController) e nvidia-smi. Fonte, gabinete e cooler o
 sistema nao enxerga: ficam como estao na montagem.
 O que nao esta na base (ex.: uma placa-mae diferente) vira uma peca "do seu PC" montada com o que foi lido.
 As funcoes parse_* recebem o texto dos comandos, para dar para testar sem o hardware.
@@ -12,6 +13,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from . import core
@@ -112,8 +114,88 @@ def parse_lspci(text: str) -> list[dict]:
     return out
 
 
+# Windows: uma consulta CIM (WMI) so, sem administrador, devolve tudo em JSON
+WIN_QUERY = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$o = [ordered]@{}
+$o.cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
+$b = Get-CimInstance Win32_BaseBoard | Select-Object -First 1
+$o.board = $b.Product; $o.board_vendor = $b.Manufacturer
+$o.mem = @(Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, ConfiguredClockSpeed, Speed, SMBIOSMemoryType, PartNumber, TypeDetail)
+$a = Get-CimInstance Win32_PhysicalMemoryArray | Select-Object -First 1
+$o.mem_slots = $a.MemoryDevices; $o.mem_max_kb = $a.MaxCapacityEx
+$o.disks = @(Get-PhysicalDisk | Select-Object FriendlyName, MediaType, BusType, Size)
+$o.video = @(Get-CimInstance Win32_VideoController | Select-Object Name, AdapterCompatibility)
+$o | ConvertTo-Json -Depth 4 -Compress
+"""
+SMBIOS_MEM = {24: "DDR3", 26: "DDR4", 34: "DDR5", 35: "DDR5"}   # SMBIOSMemoryType
+BUS = {17: "nvme", 11: "sata", 8: "sata", 3: "sata", 7: "usb"}     # BusType do Get-PhysicalDisk
+
+
+def parse_windows(text: str) -> dict:
+    """JSON do WIN_QUERY -> o mesmo formato do read_system do Linux (cpu, board, mem, disks, gpus)."""
+    import json
+    try:
+        d = json.loads(text or "{}")
+    except ValueError:
+        d = {}
+    def lst(v):
+        return v if isinstance(v, list) else ([v] if isinstance(v, dict) else [])
+    sticks = [m for m in lst(d.get("mem")) if int(m.get("Capacity") or 0) > 0]
+    mem = {}
+    if sticks:
+        types = [SMBIOS_MEM.get(int(m.get("SMBIOSMemoryType") or 0), "") for m in sticks]
+        speeds = [int(m.get(k) or 0) for m in sticks for k in ("ConfiguredClockSpeed", "Speed") if int(m.get(k) or 0) > 0][:1] or [0]
+        parts = sorted({(m.get("PartNumber") or "").strip() for m in sticks} - {"", "Unknown"})
+        mem = {"type": next((t for t in types if t), ""), "gb": round(sum(int(m["Capacity"]) for m in sticks) / 1024 ** 3),
+               "sticks": len(sticks), "speed": speeds[0], "part": parts[0] if parts else "",
+               "reg": any(int(m.get("TypeDetail") or 0) & 0x2000 for m in sticks),   # bit 13 = registrada (buffered)
+               "slots": int(d.get("mem_slots") or 0), "max_gb": round(int(d.get("mem_max_kb") or 0) / 1024 ** 2)}
+    disks = []
+    for x in lst(d.get("disks")):
+        # BusType e MediaType vem como numero ou como texto ("NVMe", "SATA", "HDD"), conforme a versao do PowerShell
+        bt, mt = str(x.get("BusType") or "0"), str(x.get("MediaType") or "0")
+        bus = BUS.get(int(bt), "sata") if bt.isdigit() else ("nvme" if bt.lower() == "nvme" else "usb" if bt.lower() == "usb" else "sata")
+        size = int(x.get("Size") or 0)
+        if bus == "usb" or size < 16 * 1024 ** 3:
+            continue
+        hdd = mt == "3" or mt.upper() == "HDD"
+        kind = "hdd" if hdd else ("nvme" if bus == "nvme" else "sata")
+        disks.append({"name": x.get("FriendlyName") or "", "kind": kind, "gb": round(size / 1e9), "model": (x.get("FriendlyName") or "").strip()})
+    order = {"nvme": 0, "sata": 1, "hdd": 2}
+    disks.sort(key=lambda x: (order[x["kind"]], -x["gb"]))
+    gpus = []
+    for v in lst(d.get("video")):
+        name, comp = (v.get("Name") or "").strip(), (v.get("AdapterCompatibility") or "").lower()
+        if not name or re.search(r"basic|remote|virtual|mirror|parsec|meta", name, re.I):
+            continue
+        vendor = "nvidia" if "nvidia" in comp + name.lower() else "amd" if re.search(r"amd|ati|radeon", comp + name.lower()) else \
+            "intel" if "intel" in comp else "outro"
+        gpus.append({"name": name, "vendor": vendor, "vram": 0})
+    return {"cpu": (d.get("cpu") or "").strip(), "board": (d.get("board") or "").strip(), "board_vendor": (d.get("board_vendor") or "").strip(),
+            "mem": mem, "disks": disks, "gpus": gpus}
+
+
+def read_windows() -> dict:
+    out = ""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", WIN_QUERY], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=40,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        pass
+    r = parse_windows(out)
+    # a NVIDIA diz a VRAM certa pelo nvidia-smi (o WMI para em 4 GB)
+    nv = parse_nvidia_smi(sh(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"]))
+    if nv:
+        r["gpus"] = nv + [g for g in r["gpus"] if g["vendor"] != "nvidia"]
+    return r
+
+
 def read_system() -> dict:
     """Le o PC de verdade. Devolve o texto/infos brutos (para casar depois)."""
+    if sys.platform == "win32":
+        return read_windows()
     dmi = "/sys/class/dmi/id/"
     gpus = parse_nvidia_smi(sh(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"]))
     others = [g for g in parse_lspci(sh(["lspci", "-mm"])) if g["vendor"] != "nvidia" or not gpus]
